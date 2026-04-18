@@ -247,3 +247,7 @@ Apache License 2.0 — see [LICENSE](LICENSE)
 - [ClawHub](https://clawhub.ai/skills/officeclaw)
 - [OpenClaw](https://docs.openclaw.ai)
 - [Microsoft Graph API](https://docs.microsoft.com/graph/)
+
+## Download History
+
+[![Download History](https://skill-history.com/chart/danielithomas/officeclaw.svg)](https://skill-history.com/danielithomas/officeclaw)
