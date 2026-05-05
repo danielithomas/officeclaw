@@ -135,8 +135,25 @@ officeclaw mail send --to user@example.com --subject "Report" --body "Attached" 
 officeclaw mail search --query "from:boss@example.com"
 officeclaw mail archive <message-id>           # Archive a message
 officeclaw mail mark-read <message-id>         # Mark as read
+officeclaw mail attachments <message-id>       # List attachments for a message
+officeclaw mail download <message-id> <attachment-name>  # Download an attachment
 officeclaw --json mail list                    # JSON output for parsing
 ```
+
+### When to Use Attachment Commands
+
+Activate attachment commands when the user needs to:
+- **List attachments**: "Show me the attachments for this email" or "What files are attached to the latest message?"
+- **Download attachments**: "Download the attached PDF" or "Save the transcript from that email"
+
+### Attachment Security for Agents
+
+When using attachment download features:
+1. **Default-deny**: Attachment download is disabled by default; explicitly set `OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD=true`
+2. **Safe senders list**: Use `OFFICECLAW_SAFE_SENDERS_LIST` to whitelist trusted domains (e.g., `@focalleap.com`)
+3. **Confirm before downloading**: Ask the user before downloading files from unknown senders
+4. **Size/type validation**: Respect `OFFICECLAW_ATTACHMENT_MAX_SIZE_MB` and `OFFICECLAW_ATTACHMENT_ALLOWED_TYPES`
+5. **Audit trail**: Downloads are logged by the CLI for security review
 
 ### Calendar Commands
 

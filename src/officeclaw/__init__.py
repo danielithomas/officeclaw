@@ -19,7 +19,7 @@ Example usage:
 
 from __future__ import annotations
 
-__version__ = "1.0.2"
+__version__ = "1.0.5"
 __author__ = "Daniel Thomas"
 __email__ = "dan@theenquiringmind.com"
 
@@ -47,6 +47,18 @@ def __getattr__(name: str):
         from officeclaw.client import GraphClient
 
         return GraphClient
+    elif name == "AttachmentSecurityError":
+        from officeclaw.exceptions import AttachmentSecurityError
+
+        return AttachmentSecurityError
+    elif name == "AttachmentSizeError":
+        from officeclaw.exceptions import AttachmentSizeError
+
+        return AttachmentSizeError
+    elif name == "AttachmentTypeError":
+        from officeclaw.exceptions import AttachmentTypeError
+
+        return AttachmentTypeError
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -58,4 +70,7 @@ __all__ = [
     "TasksClient",
     "TokenManager",
     "GraphClient",
+    "AttachmentSecurityError",
+    "AttachmentSizeError",
+    "AttachmentTypeError",
 ]

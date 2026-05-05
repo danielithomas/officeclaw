@@ -23,7 +23,14 @@ from rich.table import Table
 from officeclaw import __version__
 from officeclaw.auth import TokenManager
 from officeclaw.client import GraphClient
-from officeclaw.exceptions import AuthenticationError, GraphAPIError, OutclawError
+from officeclaw.exceptions import (
+    AttachmentSecurityError,
+    AttachmentSizeError,
+    AttachmentTypeError,
+    AuthenticationError,
+    GraphAPIError,
+    OutclawError,
+)
 
 # Rich console for pretty output
 console = Console()
@@ -81,6 +88,16 @@ def handle_error(e: Exception) -> None:
         error_console.print("Run [bold]officeclaw auth login[/bold] to authenticate.")
     elif isinstance(e, GraphAPIError):
         error_console.print(f"[red]API Error ({e.code}):[/red] {e.message}")
+    elif isinstance(e, AttachmentSecurityError):
+        error_console.print(f"[red]Security Blocked:[/red] {e}")
+    elif isinstance(e, AttachmentSizeError):
+        error_console.print(
+            f"[red]Error:[/red] Attachment size ({e.size_bytes / 1024 / 1024:.1f} MB) exceeds maximum ({e.max_size_mb} MB)"
+        )
+    elif isinstance(e, AttachmentTypeError):
+        error_console.print(
+            f"[red]Error:[/red] Attachment type '{e.content_type}' not allowed. Allowed: {', '.join(e.allowed_types)}"
+        )
     elif isinstance(e, OutclawError):
         error_console.print(f"[red]Error:[/red] {e}")
     else:
@@ -544,6 +561,88 @@ def mail_archive(ctx: click.Context, message_id: str) -> None:
             output_json(result)
         else:
             console.print("[green]✓[/green] Message archived.")
+    except Exception as e:
+        handle_error(e)
+
+
+@mail.command("attachments")
+@click.argument("message_id")
+@click.pass_context
+def mail_attachments(ctx: click.Context, message_id: str) -> None:
+    """List attachments for a message."""
+    try:
+        with GraphClient() as client:
+            attachments = client.get_all(f"/me/messages/{message_id}/attachments")
+
+        if ctx.obj.get("json"):
+            output_json(attachments)
+            return
+
+        if not attachments:
+            console.print("[yellow]No attachments found.[/yellow]")
+            return
+
+        table = Table(title=f"Attachments ({message_id[:20]}...)")
+        table.add_column("Name", style="cyan", max_width=40)
+        table.add_column("Type")
+        table.add_column("Size", justify="right")
+        table.add_column("Inline")
+
+        for att in attachments:
+            name = att.get("name", "(unnamed)")
+            content_type = att.get("contentType", "unknown")
+            size = att.get("size", 0)
+            is_inline = "Yes" if att.get("isInline") else "No"
+            size_str = f"{size / 1024:.1f} KB" if size else "0 B"
+
+            table.add_row(name, content_type, size_str, is_inline)
+
+        console.print(table)
+    except Exception as e:
+        handle_error(e)
+
+
+@mail.command("download")
+@click.argument("message_id")
+@click.argument("attachment_name")
+@click.argument("output_path", required=False, default=None)
+@click.pass_context
+def mail_download(ctx: click.Context, message_id: str, attachment_name: str, output_path: str | None) -> None:
+    """Download an attachment from a message.
+
+    Requires OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD=true in .env (disabled by default for safety).
+    """
+    require_capability("OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD", "Downloading attachments")
+    try:
+        from officeclaw.mail import MailClient
+
+        with MailClient() as mc:
+            attachments = mc.list_attachments(message_id)
+
+            # Find attachment by name
+            attachment_id = None
+            for att in attachments:
+                if att.get("name", "").lower() == attachment_name.lower():
+                    attachment_id = att.get("id")
+                    break
+
+            if not attachment_id:
+                error_console.print(
+                    f"[red]Attachment not found:[/red] '{attachment_name}' on message {message_id}"
+                )
+                error_console.print(
+                    f"Run [bold]officeclaw mail attachments {message_id}[/bold] to list available attachments."
+                )
+                sys.exit(1)
+
+            downloaded_path = mc.download_attachment(
+                message_id, attachment_id, output_path=output_path
+            )
+
+        if ctx.obj.get("json"):
+            output_json({"downloaded": True, "path": downloaded_path})
+        else:
+            console.print(f"[green]✓[/green] Downloaded: {downloaded_path}")
     except Exception as e:
         handle_error(e)
 

@@ -57,6 +57,33 @@ SAMPLE_EVENT = {
     "isCancelled": False,
 }
 
+SAMPLE_ATTACHMENT = {
+    "@odata.type": "#microsoft.graph.fileAttachment",
+    "id": "AAMkAGUz...",
+    "lastModifiedDateTime": "2026-04-23T23:31:17Z",
+    "name": "meeting_notes.txt",
+    "contentType": "text/plain",
+    "size": 15243,
+    "isInline": False,
+    "contentBytes": "SGVsbG8sIHRoaXMgaXMgdGVzdCBjb250ZW50Lg==",
+}
+
+SAMPLE_ATTACHMENT_PDF = {
+    "@odata.type": "#microsoft.graph.fileAttachment",
+    "id": "AAMkAGUy...",
+    "lastModifiedDateTime": "2026-04-23T23:31:17Z",
+    "name": "report.pdf",
+    "contentType": "application/pdf",
+    "size": 10485760,
+    "isInline": False,
+    "contentBytes": "JVBERi0xLjQKJcOkw7zDtsO...",
+}
+
+SAMPLE_MESSAGE_WITH_ATTACHMENTS = {
+    **SAMPLE_MESSAGE,
+    "hasAttachments": True,
+}
+
 SAMPLE_TASK_LIST = {
     "id": "AAMkADE...",
     "displayName": "Tasks",
@@ -166,6 +193,31 @@ def sample_messages() -> list[dict[str, Any]]:
 def sample_event() -> dict[str, Any]:
     """Return a sample calendar event."""
     return SAMPLE_EVENT.copy()
+
+
+@pytest.fixture
+def sample_attachment() -> dict[str, Any]:
+    """Return a sample file attachment."""
+    return SAMPLE_ATTACHMENT.copy()
+
+
+@pytest.fixture
+def sample_attachments() -> list[dict[str, Any]]:
+    """Return a list of sample attachments."""
+    return [
+        SAMPLE_ATTACHMENT.copy(),
+        SAMPLE_ATTACHMENT_PDF.copy(),
+    ]
+
+
+@pytest.fixture
+def sample_message_with_attachments() -> dict[str, Any]:
+    """Return a sample message with attachments."""
+    return {
+        **SAMPLE_MESSAGE,
+        "id": "msg-with-attachments",
+        "hasAttachments": True,
+    }
 
 
 @pytest.fixture

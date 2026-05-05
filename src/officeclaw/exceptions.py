@@ -98,3 +98,55 @@ class TokenStorageError(OutclawError):
     """
 
     pass
+
+
+class AttachmentSecurityError(OutclawError):
+    """
+    Raised when an attachment download is blocked for security reasons.
+
+    This can occur when:
+    - The sender is not in the configured safe senders list
+    - Attachment download capability is disabled
+
+    Resolution: Check OFFICECLAW_SAFE_SENDERS_LIST configuration.
+    """
+
+    pass
+
+
+class AttachmentSizeError(OutclawError):
+    """
+    Raised when an attachment exceeds the configured maximum size.
+
+    Attributes:
+        size_bytes: Actual attachment size in bytes
+        max_size_mb: Configured maximum size in MB
+
+    Resolution: Increase OFFICECLAW_ATTACHMENT_MAX_SIZE_MB or use alternative delivery.
+    """
+
+    def __init__(self, size_bytes: int, max_size_mb: int):
+        self.size_bytes = size_bytes
+        self.max_size_mb = max_size_mb
+        super().__init__(
+            f"Attachment size ({size_bytes / 1024 / 1024:.1f} MB) exceeds maximum ({max_size_mb} MB)"
+        )
+
+
+class AttachmentTypeError(OutclawError):
+    """
+    Raised when an attachment MIME type is not in the allowed types list.
+
+    Attributes:
+        content_type: The rejected MIME type
+        allowed_types: Configured allowed MIME types
+
+    Resolution: Add MIME type to OFFICECLAW_ATTACHMENT_ALLOWED_TYPES.
+    """
+
+    def __init__(self, content_type: str, allowed_types: list[str]):
+        self.content_type = content_type
+        self.allowed_types = allowed_types
+        super().__init__(
+            f"Attachment type '{content_type}' not in allowed types: {', '.join(allowed_types)}"
+        )

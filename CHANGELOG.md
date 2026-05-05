@@ -2,6 +2,16 @@
 
 All notable changes to OfficeClaw are documented here.
 
+## [1.0.5] — 2026-05-06
+
+### Added
+- **Attachment Download Support** — securely download email attachments via Microsoft Graph API.
+  - New commands: `officeclaw mail attachments <message_id>` and `officeclaw mail download <message_id> <attachment_name>`.
+  - Security-first design: disabled by default (`OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD`), optional sender allowlist (`OFFICECLAW_SAFE_SENDERS_LIST`), MIME type filtering, and size limits.
+  - Domain wildcard support in safe senders list (`@example.com`).
+  - Path sanitisation and filename collision handling.
+  - New exceptions: `AttachmentSecurityError`, `AttachmentSizeError`, `AttachmentTypeError`.
+
 ## [1.0.4] — 2026-04-04
 
 ### Added

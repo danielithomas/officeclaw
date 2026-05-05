@@ -16,7 +16,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "officeclaw"
-version = "1.0.4"
+version = "1.0.5"
 description = "Microsoft Graph API integration for OpenClaw agents - manage email, calendar, and tasks"
 readme = "README.md"
 license = "Apache-2.0"

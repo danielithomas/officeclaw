@@ -93,6 +93,12 @@ officeclaw mail send --to user@example.com --subject "Report" --body "See attach
 # Search emails
 officeclaw mail search --query "from:boss@example.com"
 
+# List attachments for a message
+officeclaw mail attachments AQMkADEzN...
+
+# Download an attachment
+officeclaw mail download AQMkADEzN... report.pdf
+
 # View calendar
 officeclaw calendar list --start 2026-02-01 --end 2026-02-28
 
@@ -157,6 +163,8 @@ See [skill/SKILL.md](skill/SKILL.md) for the full skill manifest.
 | `officeclaw mail search --query <query>` | Search emails |
 | `officeclaw mail archive <id>` | Archive a message |
 | `officeclaw mail mark-read <id>` | Mark as read |
+| `officeclaw mail attachments <message-id>` | List attachments for a message |
+| `officeclaw mail download <message-id> <attachment-name>` | Download an attachment |
 
 ### Calendar
 
@@ -193,6 +201,12 @@ Environment variables (or `.env` file):
 | `OFFICECLAW_ENABLE_SEND` | No | Set `true` to allow send/reply/forward emails (default: disabled) |
 | `OFFICECLAW_ENABLE_DELETE` | No | Set `true` to allow deleting emails, events, tasks (default: disabled) |
 | `OFFICECLAW_ALLOWED_RECIPIENTS` | No | Comma-separated list of allowed recipient email addresses. When set, outbound emails are restricted to these addresses only. Blocked attempts are logged. See [Recipient Allowlist](#recipient-allowlist) below. |
+| `OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD` | No | Set `true` to allow downloading email attachments (default: disabled) |
+| `OFFICECLAW_SAFE_SENDERS_ONLY` | No | Set `true` to restrict downloads to allowed senders only (default: disabled) |
+| `OFFICECLAW_SAFE_SENDERS_LIST` | No | Comma-separated list of allowed sender addresses. Supports domain wildcards (`@example.com`) |
+| `OFFICECLAW_ATTACHMENT_MAX_SIZE_MB` | No | Maximum attachment size in MB (default: 25) |
+| `OFFICECLAW_ATTACHMENT_ALLOWED_TYPES` | No | Comma-separated MIME type allowlist. Use `*` to allow all (default) |
+| `OFFICECLAW_ATTACHMENT_DOWNLOAD_PATH` | No | Default download directory (default: `./downloads`) |
 
 ## Security & Privacy
 
@@ -214,6 +228,40 @@ OFFICECLAW_ALLOWED_RECIPIENTS=alice@example.com,bob@example.com,team@company.com
 - The allowlist is checked **after** the `OFFICECLAW_ENABLE_SEND` gate — users who haven't enabled sending are unaffected.
 
 This is especially important for AI agent workflows where an LLM controls email sending — the allowlist provides a hard, code-level boundary that cannot be bypassed by prompt injection or misconfiguration.
+
+### Attachment Download Security
+
+When `OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD` is enabled, additional security controls protect against malicious attachments:
+
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| `OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD` | `false` | Master switch — disabled by default |
+| `OFFICECLAW_SAFE_SENDERS_ONLY` | `false` | If `true`, only downloads from allowed senders |
+| `OFFICECLAW_SAFE_SENDERS_LIST` | `[]` | Allowed sender emails. Supports exact match (`user@example.com`) or domain wildcards (`@example.com`) |
+| `OFFICECLAW_ATTACHMENT_MAX_SIZE_MB` | `25` | Maximum file size. Fails fast on oversized attachments |
+| `OFFICECLAW_ATTACHMENT_ALLOWED_TYPES` | `*` | MIME type allowlist. E.g.: `text/plain,image/png,application/pdf` |
+| `OFFICECLAW_ATTACHMENT_DOWNLOAD_PATH` | `./downloads` | Default save location |
+
+**Example — Restricted environment:**
+
+```bash
+# .env
+OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD=true
+OFFICECLAW_SAFE_SENDERS_ONLY=true
+OFFICECLAW_SAFE_SENDERS_LIST="danielithomas@hotmail.com,dan@theenquiringmind.com,@focalleap.com"
+OFFICECLAW_ATTACHMENT_MAX_SIZE_MB=10
+OFFICECLAW_ATTACHMENT_ALLOWED_TYPES="text/plain,text/markdown,image/svg+xml,image/png,image/jpeg,application/pdf"
+```
+
+**Safe sender matching logic:**
+- Exact email: `sender@example.com`
+- Domain wildcard: `@theenquiringmind.com` matches any address from that domain
+- Display name is **never** used for matching (spoofable)
+
+**Output file handling:**
+- Path traversal is blocked (`../`, `~/.bashrc`)
+- Download directory is auto-created if missing
+- Filename collisions auto-resolved: `file.pdf` → `file(1).pdf`
 - **No client secret required** — Uses device code flow (public client) by default
 - **Least-privilege permissions** — You choose which Graph API scopes to grant — read-only is sufficient for most use cases. See the setup guide above.
 - **Tokens stored securely** — `~/.officeclaw/token_cache.json` with 600 file permissions

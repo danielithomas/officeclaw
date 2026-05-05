@@ -232,6 +232,70 @@ class TestTasksCommands:
         assert result.exit_code != 0
 
 
+class TestMailAttachmentCommands:
+    """Test mail attachment-related CLI commands."""
+
+    @patch("officeclaw.cli.GraphClient")
+    def test_mail_attachments_success(self, mock_client_class, sample_attachments):
+        """Test successful mail attachments listing."""
+        from officeclaw.cli import main
+
+        mock_client = MagicMock()
+        mock_client.get_all.return_value = sample_attachments
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client_class.return_value = mock_client
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["mail", "attachments", "msg-123"])
+
+        assert result.exit_code == 0
+        assert "meeting_notes.txt" in result.output
+        assert "report.pdf" in result.output
+
+    @patch("officeclaw.cli.GraphClient")
+    def test_mail_attachments_json(self, mock_client_class, sample_attachments):
+        """Test mail attachments outputs valid JSON."""
+        from officeclaw.cli import main
+
+        mock_client = MagicMock()
+        mock_client.get_all.return_value = sample_attachments
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client_class.return_value = mock_client
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["--json", "mail", "attachments", "msg-123"])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["status"] == "success"
+        assert len(data["data"]) == 2
+
+    def test_mail_attachments_requires_message_id(self):
+        """Test mail attachments requires message-id argument."""
+        from officeclaw.cli import main
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["mail", "attachments"])
+
+        assert result.exit_code != 0
+
+    def test_mail_download_disabled(self):
+        """Test mail download blocked when capability disabled."""
+        import os
+
+        from officeclaw.cli import main
+
+        os.environ.pop("OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD", None)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["mail", "download", "msg-123", "file.txt"])
+
+        assert result.exit_code == 1
+        assert "disabled" in result.output.lower()
+
+
 class TestAuthCommands:
     """Test authentication-related CLI commands."""
 
