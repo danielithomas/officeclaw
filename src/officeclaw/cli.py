@@ -53,7 +53,7 @@ def _is_enabled(env_var: str) -> bool:
     if not _dotenv_loaded:
         from dotenv import load_dotenv
 
-        load_dotenv()
+        load_dotenv(override=True)
         _dotenv_loaded = True
     return os.environ.get(env_var, "").lower() in ("true", "1", "yes")
 

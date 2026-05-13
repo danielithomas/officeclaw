@@ -396,7 +396,13 @@ class TestCapabilityGates:
 
         runner = CliRunner()
         with (
-            patch.dict("os.environ", {"OFFICECLAW_ENABLE_SEND": "true"}),
+            patch.dict(
+                "os.environ",
+                {
+                    "OFFICECLAW_ENABLE_SEND": "true",
+                    "OFFICECLAW_ALLOWED_RECIPIENTS": "x@x.com",
+                },
+            ),
             patch("officeclaw.cli.GraphClient") as mock_gc,
         ):
             mock_client = MagicMock()
