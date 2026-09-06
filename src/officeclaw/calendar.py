@@ -6,9 +6,10 @@ Provides calendar management through Microsoft Graph API.
 
 from __future__ import annotations
 
-from datetime import date
 from typing import Any
 
+from officeclaw import policy
+from officeclaw import recurrence as recurrence_module
 from officeclaw.client import GraphClient
 
 
@@ -77,23 +78,12 @@ class CalendarClient:
             headers=headers,
         )
 
-    # Simple names for the patterns people actually ask for from a CLI.
-    RECURRENCE_PATTERNS = {
-        "daily": {"type": "daily", "interval": 1},
-        "weekly": {"type": "weekly", "interval": 1},
-        "fortnightly": {"type": "weekly", "interval": 2},
-        "monthly": {"type": "absoluteMonthly", "interval": 1},
-        "yearly": {"type": "absoluteYearly", "interval": 1},
-        "weekdays": {
-            "type": "weekly",
-            "interval": 1,
-            "daysOfWeek": ["monday", "tuesday", "wednesday", "thursday", "friday"],
-        },
-    }
+    # Recurrence spellings accepted by --recurrence; the parser is shared with
+    # tasks, so `weekly:MON,WED` means the same thing in both.
+    RECURRENCE_PATTERNS = recurrence_module.KINDS
 
-    @classmethod
+    @staticmethod
     def build_recurrence(
-        cls,
         pattern: str,
         start: str,
         until: str | None = None,
@@ -101,60 +91,14 @@ class CalendarClient:
         timezone: str = "UTC",
     ) -> dict[str, Any]:
         """
-        Build a patternedRecurrence from a simple pattern name.
+        Build a patternedRecurrence from a shorthand spec.
 
-        Full RRULE expressions are deliberately not supported; the named
-        patterns cover what CLI event creation is for.
-
-        Args:
-            pattern: One of RECURRENCE_PATTERNS
-            start: First occurrence date (YYYY-MM-DD or ISO datetime)
-            until: Last date the series may run to
-            count: Number of occurrences (alternative to ``until``)
-            timezone: Timezone the range is expressed in
-
-        Returns:
-            A patternedRecurrence object
+        See :mod:`officeclaw.recurrence` for the accepted spellings.
 
         Raises:
-            ValueError: If the pattern is unknown, or both until and count given
+            ValueError: If the spec is unknown, or both until and count given.
         """
-        if pattern not in cls.RECURRENCE_PATTERNS:
-            allowed = ", ".join(sorted(cls.RECURRENCE_PATTERNS))
-            raise ValueError(f"Unknown recurrence {pattern!r}. Expected one of: {allowed}.")
-        if until and count:
-            raise ValueError("Give either --recurrence-until or --recurrence-count, not both.")
-
-        recurrence_pattern = dict(cls.RECURRENCE_PATTERNS[pattern])
-        start_date = start.split("T")[0]
-
-        if recurrence_pattern["type"] == "weekly" and "daysOfWeek" not in recurrence_pattern:
-            weekday = date.fromisoformat(start_date).strftime("%A").lower()
-            recurrence_pattern["daysOfWeek"] = [weekday]
-        if recurrence_pattern["type"] == "absoluteMonthly":
-            recurrence_pattern["dayOfMonth"] = date.fromisoformat(start_date).day
-        if recurrence_pattern["type"] == "absoluteYearly":
-            parsed = date.fromisoformat(start_date)
-            recurrence_pattern["dayOfMonth"] = parsed.day
-            recurrence_pattern["month"] = parsed.month
-
-        if until:
-            recurrence_range: dict[str, Any] = {
-                "type": "endDate",
-                "startDate": start_date,
-                "endDate": until,
-            }
-        elif count:
-            recurrence_range = {
-                "type": "numbered",
-                "startDate": start_date,
-                "numberOfOccurrences": count,
-            }
-        else:
-            recurrence_range = {"type": "noEnd", "startDate": start_date}
-
-        recurrence_range["recurrenceTimeZone"] = timezone
-        return {"pattern": recurrence_pattern, "range": recurrence_range}
+        return recurrence_module.build(pattern, start, until=until, count=count, timezone=timezone)
 
     def get_event(self, event_id: str) -> dict[str, Any]:
         """
@@ -223,6 +167,11 @@ class CalendarClient:
             }
 
         if attendees:
+            # A meeting invitation is email: Graph mails every attendee. This
+            # is the same allowlist that governs `mail send`, for the same
+            # reason — otherwise an agent blocked from mailing someone could
+            # simply invite them instead.
+            policy.check_recipients(attendees, action="calendar-invite", subject=subject)
             event["attendees"] = [
                 {
                     "emailAddress": {"address": email},
@@ -249,6 +198,7 @@ class CalendarClient:
         end: str | None = None,
         location: str | None = None,
         body: str | None = None,
+        attendees: list[str] | None = None,
         timezone: str = "UTC",
     ) -> dict[str, Any]:
         """
@@ -261,6 +211,8 @@ class CalendarClient:
             end: New end datetime
             location: New location
             body: New description
+            attendees: Replacement attendee list; checked against the recipient
+                allowlist, since updating attendees sends invitations
             timezone: Timezone for dates
 
         Returns:
@@ -291,6 +243,12 @@ class CalendarClient:
                 "contentType": "Text",
                 "content": body,
             }
+
+        if attendees is not None:
+            policy.check_recipients(attendees, action="calendar-invite", subject=subject)
+            data["attendees"] = [
+                {"emailAddress": {"address": email}, "type": "required"} for email in attendees
+            ]
 
         updated: dict[str, Any] = self._client.patch(f"/me/events/{event_id}", data)
         return updated

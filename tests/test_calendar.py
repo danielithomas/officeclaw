@@ -306,7 +306,7 @@ class TestRecurrence:
     def test_unknown_pattern_is_refused(self):
         from officeclaw.calendar import CalendarClient
 
-        with pytest.raises(ValueError, match="Unknown recurrence"):
+        with pytest.raises(ValueError, match="Unrecognised recurrence"):
             CalendarClient.build_recurrence("hourly", "2026-09-08")
 
     @patch("officeclaw.calendar.GraphClient")
@@ -327,3 +327,113 @@ class TestRecurrence:
 
         payload = mock_client.post.call_args[0][1]
         assert payload["recurrence"]["pattern"]["type"] == "weekly"
+
+
+class TestAttendeeAllowlist:
+    """Inviting someone emails them, so attendees face the mail allowlist.
+
+    Closes the gap 1.1.0 introduced by adding --attendee without this check
+    (raised in PR #8 by danbryant201).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_block_logging(self, tmp_path):
+        from officeclaw import policy
+
+        with (
+            patch.object(policy, "LOG_DIR", tmp_path),
+            patch.object(policy, "BLOCK_LOG", tmp_path / "blocked.log"),
+            patch.object(policy, "ALERT_FILE", tmp_path / "alert.json"),
+        ):
+            yield
+
+    @patch("officeclaw.calendar.GraphClient")
+    def test_create_blocks_an_unlisted_attendee(self, mock_client_class):
+        from officeclaw.calendar import CalendarClient
+        from officeclaw.exceptions import RecipientNotAllowedError
+
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+
+        env = {"OFFICECLAW_ALLOWED_RECIPIENTS": "alice@example.com"}
+        with patch.dict("os.environ", env), pytest.raises(RecipientNotAllowedError):
+            CalendarClient().create_event(
+                "Sync",
+                "2026-09-08T10:00:00",
+                "2026-09-08T11:00:00",
+                attendees=["mallory@evil.com"],
+            )
+
+        mock_client.post.assert_not_called()
+
+    @patch("officeclaw.calendar.GraphClient")
+    def test_create_allows_a_listed_attendee(self, mock_client_class):
+        from officeclaw.calendar import CalendarClient
+
+        mock_client = MagicMock()
+        mock_client.post.return_value = {}
+        mock_client_class.return_value = mock_client
+
+        env = {"OFFICECLAW_ALLOWED_RECIPIENTS": "alice@example.com"}
+        with patch.dict("os.environ", env):
+            CalendarClient().create_event(
+                "Sync",
+                "2026-09-08T10:00:00",
+                "2026-09-08T11:00:00",
+                attendees=["alice@example.com"],
+            )
+
+        assert mock_client.post.call_args[0][1]["attendees"][0]["emailAddress"]["address"] == (
+            "alice@example.com"
+        )
+
+    @patch("officeclaw.calendar.GraphClient")
+    def test_update_blocks_an_unlisted_attendee(self, mock_client_class):
+        from officeclaw.calendar import CalendarClient
+        from officeclaw.exceptions import RecipientNotAllowedError
+
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+
+        env = {"OFFICECLAW_ALLOWED_RECIPIENTS": "alice@example.com"}
+        with patch.dict("os.environ", env), pytest.raises(RecipientNotAllowedError):
+            CalendarClient().update_event("evt-1", attendees=["mallory@evil.com"])
+
+        mock_client.patch.assert_not_called()
+
+    @patch("officeclaw.calendar.GraphClient")
+    def test_no_allowlist_permits_any_attendee(self, mock_client_class):
+        from officeclaw.calendar import CalendarClient
+
+        mock_client = MagicMock()
+        mock_client.post.return_value = {}
+        mock_client_class.return_value = mock_client
+
+        with patch.dict("os.environ", {"OFFICECLAW_ALLOWED_RECIPIENTS": ""}):
+            CalendarClient().create_event(
+                "Sync",
+                "2026-09-08T10:00:00",
+                "2026-09-08T11:00:00",
+                attendees=["anyone@anywhere.com"],
+            )
+
+        mock_client.post.assert_called_once()
+
+    @patch("officeclaw.calendar.GraphClient")
+    def test_blocked_invitation_is_logged(self, mock_client_class, tmp_path):
+        from officeclaw.calendar import CalendarClient
+        from officeclaw.exceptions import RecipientNotAllowedError
+
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+
+        env = {"OFFICECLAW_ALLOWED_RECIPIENTS": "alice@example.com"}
+        with patch.dict("os.environ", env), pytest.raises(RecipientNotAllowedError):
+            CalendarClient().create_event(
+                "Sync",
+                "2026-09-08T10:00:00",
+                "2026-09-08T11:00:00",
+                attendees=["mallory@evil.com"],
+            )
+
+        assert "action=calendar-invite" in (tmp_path / "blocked.log").read_text()

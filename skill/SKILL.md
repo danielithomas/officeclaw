@@ -4,10 +4,10 @@ description: Connect to personal Microsoft accounts via Microsoft Graph API to m
 license: Apache-2.0
 homepage: https://github.com/danielithomas/officeclaw
 user-invocable: true
-compatibility: Requires Python 3.9+, network access to graph.microsoft.com, and one-time OAuth setup
+compatibility: Requires Python 3.10+, network access to graph.microsoft.com, and one-time OAuth setup
 metadata:
   author: Daniel Thomas
-  version: "1.0.4"
+  version: "1.1.1"
   openclaw:
     requires:
       anyBins: ["python", "python3", "officeclaw"]
@@ -21,23 +21,30 @@ Connect your OpenClaw agent to personal Microsoft accounts (Outlook.com, Hotmail
 
 ## Installation
 
-Install from PyPI:
+**This skill documents officeclaw 1.1.1.** Earlier versions lack the commands
+below — `--list-name`, the due-date filters, `--repeat`, `tasks steps`,
+`mail download-all`, `calendar --recurrence`, `auth refresh` and JSON error
+output — and they do not check calendar attendees against the recipient
+allowlist. Install or upgrade to at least 1.1.1:
 
 ```bash
-pip install officeclaw
+pip install --upgrade "officeclaw>=1.1.1"
 ```
 
 Or with uv:
 
 ```bash
-uv pip install officeclaw
+uv pip install --upgrade "officeclaw>=1.1.1"
 ```
 
-Verify installation:
+Verify the installed version:
 
 ```bash
-officeclaw --version
+officeclaw --version   # expect 1.1.1 or newer
 ```
+
+Requires Python 3.10 or newer (3.9 reached end of life in October 2025, and the
+patched releases of the dependencies need 3.10).
 
 ## Setup (One-Time)
 
@@ -165,6 +172,17 @@ officeclaw mail send --to user@example.com --subject "Report" --body "Attached" 
 officeclaw mail search "from:boss@example.com"   # QUERY is positional
 officeclaw mail archive <message-id>           # Archive a message
 officeclaw mail mark-read <message-id>         # Mark as read
+officeclaw mail move <message-id> --folder Archive
+
+# Replying and forwarding also need OFFICECLAW_ENABLE_SEND=true, and are
+# subject to the recipient allowlist — reply-all is blocked if any address on
+# the thread is unlisted.
+officeclaw mail reply <message-id> --body "Thanks"
+officeclaw mail reply <message-id> --body "Thanks" --reply-all
+officeclaw mail forward <message-id> --to colleague@example.com --comment "FYI"
+
+# Needs OFFICECLAW_ENABLE_DELETE=true
+officeclaw mail delete <message-id>
 officeclaw mail list --json                    # JSON output for parsing
 
 # Attachments — all require OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD=true
@@ -213,6 +231,15 @@ officeclaw calendar create \
   --location "Conference Room"
 officeclaw calendar get <event-id>
 officeclaw calendar update <event-id> --subject "Updated Meeting"
+officeclaw calendar update <event-id> --attendee alice@example.com   # Replaces the attendee list
+officeclaw calendar list-calendars
+
+# Responding to an invitation
+officeclaw calendar accept <event-id> --comment "See you there"
+officeclaw calendar decline <event-id>
+
+# Needs OFFICECLAW_ENABLE_DELETE=true
+officeclaw calendar delete <event-id>
 officeclaw calendar delete <event-id>
 officeclaw calendar list --start 2026-02-01 --end 2026-02-28 --json
 
@@ -225,8 +252,13 @@ officeclaw calendar create \
   --online-meeting \
   --recurrence weekly --recurrence-count 12
 
-# --recurrence: daily | weekly | fortnightly | weekdays | monthly | yearly
-# End the series with --recurrence-until YYYY-MM-DD or --recurrence-count N (not both)
+# --recurrence and tasks --repeat share one syntax:
+#   daily            daily:3          every day / every third day
+#   weekly           weekly:MON,WED   the start weekday / named days
+#   fortnightly      weekdays         every second week / Mon-Fri
+#   monthly          monthly:15       the start day of month / the 15th
+#   yearly                            annually on the start date
+# End a calendar series with --recurrence-until YYYY-MM-DD or --recurrence-count N (not both)
 ```
 
 ### Task Commands
@@ -261,10 +293,25 @@ officeclaw tasks create \
   --category "finance,admin"
 
 officeclaw tasks update --task-id <task-id> --reminder "2026-09-16T08:00:00"
-officeclaw tasks update --task-id <task-id> --reminder ""   # Clear the reminder
+officeclaw tasks update --task-id <task-id> --no-reminder    # Clear the reminder
+
+# Repeating tasks
+officeclaw tasks create --title "Water plants" --repeat "weekly:MON,THU"
+officeclaw tasks create --title "Rent" --due-date 2026-10-01 --repeat monthly
+officeclaw tasks update --task-id <task-id> --no-repeat      # Stop repeating
+
+# Steps (checklist items within a task)
+officeclaw tasks steps list --task-id <task-id>
+officeclaw tasks steps add --task-id <task-id> "Buy pots"
+officeclaw tasks steps complete --task-id <task-id> --item-id <item-id>
+officeclaw tasks steps complete --task-id <task-id> --item-id <item-id> --undo
+officeclaw tasks steps delete --task-id <task-id> --item-id <item-id>
 officeclaw tasks complete --task-id <task-id>
 officeclaw tasks reopen --task-id <task-id>
 officeclaw tasks get --task-id <task-id> --json
+
+# Needs OFFICECLAW_ENABLE_DELETE=true
+officeclaw tasks delete --task-id <task-id>
 ```
 
 ## Output Format
@@ -353,7 +400,7 @@ When using this skill:
 ## Security & Privacy
 
 - **Write operations disabled by default**: Send, reply, forward, and delete are all blocked unless explicitly enabled via `OFFICECLAW_ENABLE_SEND` and `OFFICECLAW_ENABLE_DELETE` environment variables. This prevents accidental or unauthorised write actions.
-- **Recipient allowlist (v1.0.4+, extended in v1.1.0)**: When `OFFICECLAW_ALLOWED_RECIPIENTS` is set, outbound email is restricted to listed addresses only — on **every** path: send (including cc and bcc), reply, reply-all, forward, and the Python API. Blocked attempts are logged to `email-blocked.log` and an `email-alert.json` alert file is written for monitoring. If not set, a runtime warning is displayed on each send. **Strongly recommended for any AI agent deployment.**
+- **Recipient allowlist (v1.0.4+, extended in v1.1.0 and v1.1.1)**: When `OFFICECLAW_ALLOWED_RECIPIENTS` is set, outbound email is restricted to listed addresses only — on **every** path: send (including cc and bcc), reply, reply-all, forward, **calendar attendees** (an invitation is email), and the Python API. Blocked attempts are logged to `email-blocked.log` and an `email-alert.json` alert file is written for monitoring. If not set, a runtime warning is displayed on each send. **Strongly recommended for any AI agent deployment.**
 - **Download location (v1.1.0+)**: with no `--dest`, files go to `OFFICECLAW_DOWNLOADS_DIR`, else `officeclaw_downloads/` inside the first allowed attachment directory, else inside the platform's Downloads folder. Saved names are made legal on Windows, macOS and Linux alike.
 - **Attachment directories (v1.1.0+)**: `OFFICECLAW_ALLOWED_ATTACHMENT_DIRS` governs both directions — where files may be attached *from* and where downloads may be written *to*. Downloaded filenames are reduced to a bare name, so a message cannot steer a write with a name like `../../.ssh/authorized_keys`, and existing files are never overwritten.
 - **`.env` cannot weaken injected settings (v1.1.0+)**: where a supervising process sets a security variable, `.env` composes with it to the stricter value — allowlists intersect, capability gates need both sources, restrictions apply if either asks. An entry that is dropped is reported with a warning, so nothing is ignored silently.
