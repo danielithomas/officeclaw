@@ -19,13 +19,15 @@ Example usage:
 
 from __future__ import annotations
 
-__version__ = "1.0.5"
+from typing import Any
+
+__version__ = "1.1.0"
 __author__ = "Daniel Thomas"
 __email__ = "dan@theenquiringmind.com"
 
 
 # Lazy imports to avoid loading everything on import
-def __getattr__(name: str):
+def __getattr__(name: str) -> Any:
     """Lazy import of client classes."""
     if name == "MailClient":
         from officeclaw.mail import MailClient
@@ -66,7 +68,6 @@ __all__ = [
     "__version__",
     "MailClient",
     "CalendarClient",
-    "TasksClient",
     "TasksClient",
     "TokenManager",
     "GraphClient",

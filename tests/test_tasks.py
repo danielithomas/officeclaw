@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 class TestTasksClient:
     """Test TasksClient operations."""
@@ -248,3 +250,70 @@ class TestTasksClient:
         assert result["title"] == "Updated title"
         call_args = mock_client.patch.call_args
         assert call_args[0][1]["title"] == "Updated title"
+
+
+class TestTaskStatusFilter:
+    """list_tasks only accepts statuses Microsoft To Do defines."""
+
+    @patch("officeclaw.tasks.GraphClient")
+    def test_known_status_is_filtered(self, mock_client_class):
+        from officeclaw.tasks import TasksClient
+
+        mock_client = MagicMock()
+        mock_client.get_all.return_value = []
+        mock_client_class.return_value = mock_client
+
+        TasksClient().list_tasks("list-123", status="inProgress")
+
+        params = mock_client.get_all.call_args[1]["params"]
+        assert params["$filter"] == "status eq 'inProgress'"
+
+    @patch("officeclaw.tasks.GraphClient")
+    def test_unknown_status_is_rejected(self, mock_client_class):
+        from officeclaw.tasks import TasksClient
+
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+
+        with pytest.raises(ValueError, match="Unknown task status"):
+            TasksClient().list_tasks("list-123", status="completed' or startswith(id,'")
+
+        mock_client.get_all.assert_not_called()
+
+
+class TestTaskMetadata:
+    """Categories and reminders round-trip through create and update."""
+
+    @patch("officeclaw.tasks.GraphClient")
+    def test_create_sets_reminder_and_categories(self, mock_client_class):
+        from officeclaw.tasks import TasksClient
+
+        mock_client = MagicMock()
+        mock_client.post.return_value = {}
+        mock_client_class.return_value = mock_client
+
+        TasksClient().create_task(
+            "l1",
+            "Dentist",
+            reminder="2026-09-10T08:00:00",
+            categories=["health"],
+        )
+
+        payload = mock_client.post.call_args[0][1]
+        assert payload["reminderDateTime"]["dateTime"] == "2026-09-10T08:00:00"
+        assert payload["isReminderOn"] is True
+        assert payload["categories"] == ["health"]
+
+    @patch("officeclaw.tasks.GraphClient")
+    def test_update_can_clear_a_reminder(self, mock_client_class):
+        from officeclaw.tasks import TasksClient
+
+        mock_client = MagicMock()
+        mock_client.patch.return_value = {}
+        mock_client_class.return_value = mock_client
+
+        TasksClient().update_task("l1", "t1", reminder="")
+
+        payload = mock_client.patch.call_args[0][1]
+        assert payload["reminderDateTime"] is None
+        assert payload["isReminderOn"] is False

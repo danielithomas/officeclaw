@@ -70,6 +70,60 @@ class RateLimitError(GraphAPIError):
         super().__init__("TooManyRequests", message, 429)
 
 
+class PolicyViolationError(OutclawError):
+    """
+    Base class for outbound actions refused by local policy.
+
+    Policy checks live in :mod:`officeclaw.policy` and are enforced by the CLI
+    and the Python API alike. Blocked attempts are logged.
+    """
+
+    pass
+
+
+class RecipientNotAllowedError(PolicyViolationError):
+    """
+    Raised when an outbound message targets an address outside the allowlist.
+
+    Enforced on every send path (send, reply, reply-all, forward) whenever
+    OFFICECLAW_ALLOWED_RECIPIENTS is set.
+
+    Resolution: add the address to OFFICECLAW_ALLOWED_RECIPIENTS, or send to
+    an address that is already listed.
+    """
+
+    pass
+
+
+class AttachmentNotAllowedError(PolicyViolationError):
+    """
+    Raised when a file to attach sits outside the permitted directories.
+
+    Enforced when OFFICECLAW_ALLOWED_ATTACHMENT_DIRS is set, which keeps an
+    agent from attaching arbitrary files (SSH keys, password stores) to
+    outbound mail.
+
+    Resolution: move the file into one of the configured directories, or add
+    its directory to OFFICECLAW_ALLOWED_ATTACHMENT_DIRS.
+    """
+
+    pass
+
+
+class TaskListError(OutclawError):
+    """
+    Raised when a task list cannot be resolved from a name or default.
+
+    This covers a name that matches no list, a name that matches more than one
+    (which is not guessed at), and the case where no list was given and no
+    default could be determined.
+
+    Resolution: pass --list-id, or set OFFICECLAW_DEFAULT_TASK_LIST_NAME.
+    """
+
+    pass
+
+
 class ConfigurationError(OutclawError):
     """
     Raised when configuration is missing or invalid.

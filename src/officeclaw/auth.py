@@ -17,13 +17,14 @@ import contextlib
 import json
 import os
 import time
+import warnings
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
 from msal import ConfidentialClientApplication, PublicClientApplication, SerializableTokenCache
 
+from officeclaw.env import load_environment
 from officeclaw.exceptions import AuthenticationError, ConfigurationError, TokenStorageError
 
 # Optional keyring support (legacy mode only)
@@ -41,21 +42,58 @@ CACHE_FILE = CACHE_DIR / "token_cache.json"
 
 
 def _load_msal_cache() -> SerializableTokenCache:
-    """Load the MSAL serializable token cache from disk."""
+    """
+    Load the MSAL serializable token cache from disk.
+
+    An unreadable or corrupt cache is not fatal — the user can log in again —
+    but it is reported, since silently starting from an empty cache is
+    indistinguishable from never having authenticated.
+    """
     cache = SerializableTokenCache()
     if CACHE_FILE.exists():
-        with contextlib.suppress(Exception):
+        try:
             cache.deserialize(CACHE_FILE.read_text())
+        except (OSError, ValueError, KeyError) as e:
+            warnings.warn(
+                f"Ignoring unreadable token cache at {CACHE_FILE} ({e}). "
+                "Run 'officeclaw auth login' to re-authenticate.",
+                stacklevel=2,
+            )
     return cache
+
+
+def _write_private_file(path: Path, content: str) -> None:
+    """
+    Write a file that only the owner can read.
+
+    Creates with 0600 rather than writing and chmod-ing afterwards: the latter
+    leaves the tokens readable by other local users for the width of that
+    window. Existing files are re-chmod-ed, since O_CREAT does not apply the
+    mode to a file that already exists.
+
+    On Windows there is no fchmod and POSIX modes are not the access control
+    anyway; the file inherits the ACL of the user's profile directory, which
+    is already private to that account.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
+        handle = os.fdopen(fd, "w")
+    except BaseException:
+        os.close(fd)
+        raise
+    # From here the file object owns the descriptor and closes it.
+    with handle:
+        handle.write(content)
 
 
 def _save_msal_cache(cache: SerializableTokenCache) -> None:
     """Save the MSAL token cache to disk with secure permissions."""
     if cache.has_state_changed:
         try:
-            CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            CACHE_FILE.write_text(cache.serialize())
-            os.chmod(CACHE_FILE, 0o600)
+            CACHE_DIR.mkdir(parents=True, mode=0o700, exist_ok=True)
+            _write_private_file(CACHE_FILE, cache.serialize())
         except OSError as e:
             raise TokenStorageError(f"Failed to save token cache: {e}") from e
 
@@ -89,7 +127,9 @@ class TokenManager:
     """
 
     KEYRING_SERVICE = "officeclaw"
-    LEGACY_KEYRING_SERVICE = "officeclaw"
+    # Service names used before the project was renamed. Tokens stored under
+    # them are migrated to KEYRING_SERVICE on first read.
+    LEGACY_KEYRING_SERVICES = ("outclaw", "out-claw")
     KEYRING_USERNAME = "microsoft-graph-tokens"
 
     # Default public client ID — registered by OfficeClaw project.
@@ -107,7 +147,7 @@ class TokenManager:
 
     def __init__(self) -> None:
         """Initialize token manager with configuration from environment."""
-        load_dotenv()
+        load_environment()
 
         # Load configuration
         self.client_id = os.getenv("OFFICECLAW_CLIENT_ID") or self.DEFAULT_CLIENT_ID
@@ -147,6 +187,9 @@ class TokenManager:
         cache_dir = os.getenv("OFFICECLAW_TOKEN_CACHE_DIR", ".officeclaw")
         self.token_dir = Path.home() / cache_dir
         self.token_dir.mkdir(mode=0o700, exist_ok=True)
+        with contextlib.suppress(OSError):
+            # mkdir's mode applies only on creation; tighten a pre-existing dir.
+            os.chmod(self.token_dir, 0o700)
 
         cache_file = os.getenv("OFFICECLAW_TOKEN_CACHE_FILE", "token_cache.json")
         self.token_file = self.token_dir / cache_file
@@ -213,7 +256,8 @@ class TokenManager:
         # Persist cache if tokens were refreshed
         _save_msal_cache(self._cache)
 
-        return result["access_token"]
+        access_token: str = result["access_token"]
+        return access_token
 
     def _get_access_token_confidential(self) -> str:
         """Get access token using confidential client (legacy mode)."""
@@ -227,7 +271,8 @@ class TokenManager:
         if self._needs_refresh(tokens):
             tokens = self._refresh_tokens(tokens)
 
-        return tokens["access_token"]
+        access_token: str = tokens["access_token"]
+        return access_token
 
     # ------------------------------------------------------------------
     # Public client helpers
@@ -299,9 +344,7 @@ class TokenManager:
     def _save_to_file(self, tokens: dict[str, Any]) -> None:
         """Save tokens to file with secure permissions."""
         try:
-            with open(self.token_file, "w") as f:
-                json.dump(tokens, f, indent=2)
-            os.chmod(self.token_file, 0o600)
+            _write_private_file(self.token_file, json.dumps(tokens, indent=2))
         except OSError as e:
             raise TokenStorageError(f"Failed to save tokens: {e}") from e
 
@@ -323,16 +366,16 @@ class TokenManager:
 
         # Try keyring (current service name, then legacy "officeclaw" fallback)
         if self.use_keyring and KEYRING_AVAILABLE:
-            for service in (self.KEYRING_SERVICE, self.LEGACY_KEYRING_SERVICE):
+            for service in (self.KEYRING_SERVICE, *self.LEGACY_KEYRING_SERVICES):
                 try:
                     token_json = keyring.get_password(
                         service,
                         self.KEYRING_USERNAME,
                     )
                     if token_json:
-                        tokens = json.loads(token_json)
+                        tokens: dict[str, Any] = json.loads(token_json)
                         # Migrate legacy tokens to new service name
-                        if service == self.LEGACY_KEYRING_SERVICE:
+                        if service != self.KEYRING_SERVICE:
                             self.save_tokens(tokens)
                         else:
                             self._update_cache(tokens)
@@ -344,9 +387,9 @@ class TokenManager:
         if self.token_file.exists():
             try:
                 with open(self.token_file) as f:
-                    tokens = json.load(f)
-                self._update_cache(tokens)
-                return tokens
+                    stored: dict[str, Any] = json.load(f)
+                self._update_cache(stored)
+                return stored
             except Exception as e:
                 raise TokenStorageError(f"Failed to read tokens: {e}") from e
 
@@ -384,7 +427,7 @@ class TokenManager:
             )
 
         try:
-            result = self._app.acquire_token_by_refresh_token(
+            result: dict[str, Any] = self._app.acquire_token_by_refresh_token(
                 refresh_token=refresh_token,
                 scopes=self.scopes,
             )
@@ -425,8 +468,9 @@ class TokenManager:
         else:
             # Clear keyring
             if self.use_keyring and KEYRING_AVAILABLE:
-                with contextlib.suppress(Exception):
-                    keyring.delete_password(self.KEYRING_SERVICE, self.KEYRING_USERNAME)
+                for service in (self.KEYRING_SERVICE, *self.LEGACY_KEYRING_SERVICES):
+                    with contextlib.suppress(Exception):
+                        keyring.delete_password(service, self.KEYRING_USERNAME)
 
             # Clear file
             if self.token_file.exists():
@@ -520,6 +564,58 @@ class TokenManager:
             "storage_location": storage_location,
             "mode": "confidential_client (authorization code flow)",
         }
+
+    def refresh(self) -> dict[str, Any]:
+        """
+        Refresh the access token without an interactive login.
+
+        Uses the cached refresh token. This is what happens automatically on
+        every request; the value of doing it deliberately is finding out *now*
+        whether the credentials still work, rather than when a cron job runs.
+
+        Returns:
+            Token metadata, as returned by get_token_info()
+
+        Raises:
+            AuthenticationError: If refresh fails and a login is required.
+        """
+        self.invalidate_cache()
+        self.get_access_token()
+
+        info = self.get_token_info()
+        if info is None:
+            raise AuthenticationError(
+                "No authentication tokens found. Run 'officeclaw auth login' to authenticate."
+            )
+        return info
+
+    def invalidate_cache(self) -> None:
+        """
+        Drop the in-memory token cache so the next read hits storage.
+
+        A no-op in public client mode, where MSAL owns the cache.
+        """
+        if not self.public_client_mode:
+            self._cached_tokens = None
+            self._cache_time = None
+
+    def get_account_username(self) -> str | None:
+        """
+        Address of the signed-in account, if known.
+
+        Reads what is already cached locally — no network call — so callers can
+        use it on hot paths. Returns None when it cannot be determined.
+        """
+        if self.public_client_mode:
+            accounts = self._app.get_accounts()
+            if not accounts:
+                return None
+            username = accounts[0].get("username")
+        else:
+            tokens = self.get_tokens() or {}
+            username = tokens.get("id_token_claims", {}).get("preferred_username")
+
+        return username if isinstance(username, str) and "@" in username else None
 
     @property
     def is_authenticated(self) -> bool:

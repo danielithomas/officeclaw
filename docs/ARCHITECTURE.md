@@ -163,6 +163,52 @@ Write operations are disabled by default for safety:
 
 Read operations (list, get, search) are always available. This ensures a compromised agent cannot send emails or delete data unless explicitly enabled.
 
+## Outbound Policy
+
+Beyond the gates, two opt-in allowlists constrain what may leave the mailbox. Both live in `officeclaw/policy.py` so the CLI and the Python API enforce them identically, and both log blocked attempts to `~/.openclaw/workspace/automation/logs/`.
+
+| Control | Env Var | Applies To |
+|---------|---------|------------|
+| Recipients | `OFFICECLAW_ALLOWED_RECIPIENTS` | `mail send` (to/cc/bcc), `mail reply`, `mail forward`, `MailClient` |
+| Attachments | `OFFICECLAW_ALLOWED_ATTACHMENT_DIRS` | `mail send --attachment` |
+
+Reply and reply-all resolve the thread's actual recipients (`replyTo`/`from`/`to`/`cc`, minus the mailbox owner) before sending, since Graph would otherwise choose them server-side, out of reach of the check.
+
+The attachment allowlist governs both directions: files may only be attached from those directories, and `mail attachments download` may only write into them. Names from incoming mail are reduced to a bare filename before writing, and sanitised for every platform (Windows-forbidden characters, trailing dots and spaces, reserved device names), so a shared downloads directory stays usable across machines.
+
+Download destination resolves as: `--dest` → `OFFICECLAW_DOWNLOADS_DIR` → `officeclaw_downloads/` inside the first allowed attachment directory → `officeclaw_downloads/` inside the platform's Downloads folder. Choosing the allowlisted directory when one is configured keeps the default inside the boundary by construction, rather than defaulting to a location the allowlist would then reject.
+
+## Cross-Platform Notes
+
+The package supports Linux, macOS and Windows. Points where they differ:
+
+| Concern | Handling |
+|---|---|
+| Downloads and config locations | `platformdirs`, so a relocated Windows Downloads folder or a localised XDG directory is found rather than assumed |
+| File permissions | `os.fchmod` is POSIX-only and is called only where present; on Windows token files inherit the user profile's ACL |
+| Filenames from email | Sanitised to the intersection of what all three platforms accept |
+| Config file | `~/.config/officeclaw/config.toml` on any platform, plus the platform config directory (`%LOCALAPPDATA%`, `~/Library/Application Support`) when that is where the user put it |
+
+## Configuration Precedence
+
+`officeclaw.env` loads `.env` (found from the working directory). Ordinary settings are taken from the file; security settings compose with the process environment to the stricter value — intersection for allowlists, AND for capability gates, OR for restriction toggles, minimum for ceilings — so neither a supervising daemon nor a local file can widen what the other permits. Disagreements are warned about rather than resolved silently.
+
+
+Settings resolve in this order, first match winning:
+
+1. Command-line flag
+2. Environment variable (including `.env`)
+3. `~/.config/officeclaw/config.toml` (`OFFICECLAW_CONFIG` overrides the path)
+4. Built-in default
+
+`officeclaw/config.py` refuses to read security settings from the file — capability gates, both allowlists, and credentials come from the environment alone. A process able to write the user's config directory therefore cannot grant itself send rights.
+
+## Task List Resolution
+
+`TasksClient.resolve_list_id()` is the single entry point: explicit `--list-id`, then `--list-name`, then `OFFICECLAW_DEFAULT_TASK_LIST_ID`/`_NAME`, then the list whose `wellknownListName` is `defaultList`. Name lookups are cached in `~/.officeclaw/list_cache.json` (0600) and fall back to a live lookup on a miss, so renaming a list in To Do self-heals.
+
+Due-date filtering happens client-side: `todoTask.dueDateTime.dateTime` is an `Edm.String`, so Graph rejects date comparisons against it.
+
 ---
 
 ## CI/CD Pipeline

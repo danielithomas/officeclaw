@@ -43,6 +43,19 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      - name: Check the tag matches the package version
+        # The version is single-sourced from officeclaw.__version__; a tag that
+        # disagrees with it would publish a surprise. Fail before building.
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' src/officeclaw/__init__.py)
+          tag=${GITHUB_REF_NAME#v}
+          if [ "$version" != "$tag" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match __version__ ($version)"
+            exit 1
+          fi
+          echo "Publishing version $version"
+
       - name: Install build tools
         run: |
           python -m pip install --upgrade pip

@@ -14,13 +14,13 @@ from __future__ import annotations
 import json
 import os
 import sys
-from typing import Any
+from typing import Any, NoReturn
 
 import click
 from rich.console import Console
 from rich.table import Table
 
-from officeclaw import __version__
+from officeclaw import __version__, config, env, policy
 from officeclaw.auth import TokenManager
 from officeclaw.client import GraphClient
 from officeclaw.exceptions import (
@@ -30,7 +30,12 @@ from officeclaw.exceptions import (
     AuthenticationError,
     GraphAPIError,
     OutclawError,
+    PolicyViolationError,
 )
+
+# Recurrence names offered by `calendar create --recurrence`; the patterns
+# themselves live in CalendarClient.RECURRENCE_PATTERNS.
+CALENDAR_RECURRENCES = ("daily", "weekly", "fortnightly", "weekdays", "monthly", "yearly")
 
 # Rich console for pretty output
 console = Console()
@@ -51,11 +56,11 @@ def _is_enabled(env_var: str) -> bool:
     """Check if a capability is enabled via env var or .env file."""
     global _dotenv_loaded  # noqa: PLW0603
     if not _dotenv_loaded:
-        from dotenv import load_dotenv
+        from officeclaw.env import load_environment
 
-        load_dotenv(override=True)
+        load_environment()
         _dotenv_loaded = True
-    return os.environ.get(env_var, "").lower() in ("true", "1", "yes")
+    return env.is_truthy(os.environ.get(env_var))
 
 
 def require_capability(env_var: str, action: str) -> None:
@@ -66,9 +71,43 @@ def require_capability(env_var: str, action: str) -> None:
         action: Human-readable description of the action (e.g., "send emails").
     """
     if not _is_enabled(env_var):
-        error_console.print(f"[red]Blocked:[/red] {action} is disabled by default for safety.")
-        error_console.print(f"To enable, set [bold]{env_var}=true[/bold] in your .env file.")
-        sys.exit(1)
+        fail(
+            f"Blocked: {action} is disabled by default for safety. "
+            f"To enable, set {env_var}=true in your .env file.",
+            code="CapabilityDisabled",
+        )
+
+
+def json_option(command: Any) -> Any:
+    """
+    Accept ``--json`` on a subcommand as well as on the group.
+
+    ``officeclaw --json tasks list`` worked from the first release; the natural
+    ``officeclaw tasks list --json`` did not, which is the sort of difference a
+    script author discovers the hard way. Both now set the same context flag.
+    """
+
+    def set_flag(ctx: click.Context, _param: click.Parameter, value: bool) -> bool:
+        if value:
+            ctx.ensure_object(dict)
+            ctx.obj["json"] = True
+        return value
+
+    return click.option(
+        "--json",
+        "json_output",
+        is_flag=True,
+        expose_value=False,
+        is_eager=True,
+        callback=set_flag,
+        help="Output as JSON",
+    )(command)
+
+
+def wants_json() -> bool:
+    """Whether the running command should emit JSON."""
+    ctx = click.get_current_context(silent=True)
+    return bool(ctx and isinstance(ctx.obj, dict) and ctx.obj.get("json"))
 
 
 def output_json(data: Any, status: str = "success") -> None:
@@ -81,9 +120,33 @@ def output_json(data: Any, status: str = "success") -> None:
     click.echo(json.dumps(response, indent=2, default=str))
 
 
+def error_code(e: Exception) -> str:
+    """Stable, machine-readable code for an error."""
+    if isinstance(e, GraphAPIError):
+        return e.code
+    return type(e).__name__
+
+
+def fail(message: str, code: str, hint: str | None = None) -> NoReturn:
+    """Report a failure in the caller's chosen format and exit non-zero."""
+    if wants_json():
+        output_json({"code": code, "message": message}, status="error")
+    else:
+        error_console.print(f"[red]{message}[/red]")
+        if hint:
+            error_console.print(hint)
+    sys.exit(1)
+
+
 def handle_error(e: Exception) -> None:
     """Handle and display errors."""
-    if isinstance(e, AuthenticationError):
+    if wants_json():
+        output_json({"code": error_code(e), "message": str(e)}, status="error")
+        sys.exit(1)
+
+    if isinstance(e, PolicyViolationError):
+        error_console.print(f"[red]{e}[/red]")
+    elif isinstance(e, AuthenticationError):
         error_console.print(f"[red]Authentication Error:[/red] {e}")
         error_console.print("Run [bold]officeclaw auth login[/bold] to authenticate.")
     elif isinstance(e, GraphAPIError):
@@ -121,7 +184,13 @@ def main(ctx: click.Context, json_output: bool) -> None:
     Manage email, calendar, and tasks from your personal Microsoft account.
     """
     ctx.ensure_object(dict)
-    ctx.obj["json"] = json_output
+
+    # A config file fills in what the environment does not set; it can never
+    # set security options (see officeclaw.config).
+    settings = config.load_config()
+    config.apply_to_environment(settings)
+
+    ctx.obj["json"] = json_output or settings.get("default_output") == "json"
 
 
 # ============================================
@@ -152,17 +221,44 @@ def login() -> None:
 
 
 @auth.command()
-def logout() -> None:
+@json_option
+@click.pass_context
+def logout(ctx: click.Context) -> None:
     """Clear stored authentication tokens."""
     try:
         manager = TokenManager()
         manager.clear_tokens()
-        console.print("[green]✓[/green] Logged out successfully.")
+        if ctx.obj.get("json"):
+            output_json({"logged_out": True})
+        else:
+            console.print("[green]✓[/green] Logged out successfully.")
     except Exception as e:
         handle_error(e)
 
 
 @auth.command()
+@json_option
+@click.pass_context
+def refresh(ctx: click.Context) -> None:
+    """Refresh the access token without logging in again.
+
+    Exits 1 when an interactive login is required, so a scheduled job can
+    detect it: refresh tokens do eventually expire.
+    """
+    try:
+        info = TokenManager().refresh()
+
+        if ctx.obj.get("json"):
+            output_json(info)
+        else:
+            expires_in = info.get("time_until_expiry_seconds", 0)
+            console.print(f"[green]✓[/green] Token refreshed. Valid for {expires_in}s.")
+    except Exception as e:
+        handle_error(e)
+
+
+@auth.command()
+@json_option
 @click.pass_context
 def status(ctx: click.Context) -> None:
     """Show authentication status."""
@@ -218,6 +314,7 @@ def mail() -> None:
 @click.option("--limit", default=10, help="Number of messages to return")
 @click.option("--folder", default="inbox", help="Mail folder")
 @click.option("--unread", is_flag=True, help="Only unread messages")
+@json_option
 @click.pass_context
 def mail_list(ctx: click.Context, limit: int, folder: str, unread: bool) -> None:
     """List email messages."""
@@ -265,6 +362,7 @@ def mail_list(ctx: click.Context, limit: int, folder: str, unread: bool) -> None
 
 @mail.command("get")
 @click.argument("message_id")
+@json_option
 @click.pass_context
 def mail_get(ctx: click.Context, message_id: str) -> None:
     """Get a specific email message."""
@@ -294,6 +392,7 @@ def mail_get(ctx: click.Context, message_id: str) -> None:
 @click.option("--body", required=True, help="Email body")
 @click.option("--html", is_flag=True, default=False, help="Send body as HTML instead of plain text")
 @click.option("--attachment", multiple=True, help="File path to attach (repeatable)")
+@json_option
 @click.pass_context
 def mail_send(
     ctx: click.Context, to: str, subject: str, body: str, html: bool, attachment: tuple[str, ...]
@@ -305,59 +404,39 @@ def mail_send(
     require_capability("OFFICECLAW_ENABLE_SEND", "Sending emails")
     import base64
     import mimetypes
-    from pathlib import Path
 
-    # Recipient allowlist enforcement
-    allowed_recipients_env = os.environ.get("OFFICECLAW_ALLOWED_RECIPIENTS", "")
-    if not allowed_recipients_env:
+    # Recipient allowlist enforcement. The check itself lives in
+    # officeclaw.policy, which every send path shares — reply, forward and the
+    # Python API enforce the same list.
+    if policy.get_allowed_recipients() is None:
         error_console.print(
             "[yellow]⚠️  No recipient allowlist configured. All addresses are permitted.[/yellow]\n"
             "[yellow]   Set OFFICECLAW_ALLOWED_RECIPIENTS in .env to restrict outbound email.[/yellow]\n"
             "[yellow]   Example: OFFICECLAW_ALLOWED_RECIPIENTS=alice@example.com,bob@example.com[/yellow]"
         )
-    if allowed_recipients_env:
-        allowed = {
-            addr.strip().lower() for addr in allowed_recipients_env.split(",") if addr.strip()
-        }
-        if to.strip().lower() not in allowed:
-            from datetime import datetime, timezone
-
-            block_msg = (
-                f"Blocked: {to} is not in the allowed recipients list.\n"
-                f"Subject: {subject}\n"
-                f"Allowed: {', '.join(sorted(allowed))}"
-            )
-            error_console.print(f"[red]{block_msg}[/red]")
-
-            # Log the blocked attempt
-            log_dir = Path.home() / ".openclaw" / "workspace" / "automation" / "logs"
-            log_dir.mkdir(parents=True, exist_ok=True)
-            log_file = log_dir / "email-blocked.log"
-            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-            with open(log_file, "a") as f:
-                f.write(f"[{ts}] BLOCKED | to={to} | subject={subject}\n")
-
-            # Alert: write a machine-readable alert file for external monitoring
-            alert_file = log_dir / "email-alert.json"
-            import json as _json
-
-            alert = {
-                "type": "email_blocked",
-                "timestamp": ts,
-                "to": to,
-                "subject": subject,
-                "allowed_recipients": sorted(allowed),
-            }
-            with open(alert_file, "w") as f:
-                _json.dump(alert, f, indent=2)
-
+    else:
+        try:
+            policy.check_recipients([to], action="send", subject=subject)
+        except PolicyViolationError as e:
+            error_console.print(f"[red]{e}[/red]")
             sys.exit(1)
+
+    if attachment and policy.get_allowed_attachment_dirs() is None:
+        error_console.print(
+            "[yellow]⚠️  No attachment directory allowlist configured. "
+            "Any readable file can be attached.[/yellow]\n"
+            "[yellow]   Set OFFICECLAW_ALLOWED_ATTACHMENT_DIRS in your .env to a working "
+            "directory you drop outbound files into.[/yellow]\n"
+            "[yellow]   Example: OFFICECLAW_ALLOWED_ATTACHMENT_DIRS=~/.openclaw/workspace/wip"
+            "[/yellow]"
+        )
 
     try:
         attachments = []
         for file_path in attachment:
-            p = Path(file_path)
-            if not p.exists():
+            # Raises AttachmentNotAllowedError outside the configured dirs.
+            p = policy.check_attachment_path(file_path)
+            if not p.is_file():
                 error_console.print(f"[red]File not found:[/red] {file_path}")
                 sys.exit(1)
             content_type = mimetypes.guess_type(str(p))[0] or "application/octet-stream"
@@ -397,6 +476,7 @@ def mail_send(
 @click.argument("message_id")
 @click.option("--body", required=True, help="Reply body")
 @click.option("--reply-all", is_flag=True, help="Reply to all recipients")
+@json_option
 @click.pass_context
 def mail_reply(ctx: click.Context, message_id: str, body: str, reply_all: bool) -> None:
     """Reply to an email message.
@@ -423,6 +503,7 @@ def mail_reply(ctx: click.Context, message_id: str, body: str, reply_all: bool) 
 @click.argument("message_id")
 @click.option("--to", required=True, help="Recipient email address")
 @click.option("--comment", default="", help="Optional comment")
+@json_option
 @click.pass_context
 def mail_forward(ctx: click.Context, message_id: str, to: str, comment: str) -> None:
     """Forward an email message.
@@ -447,6 +528,7 @@ def mail_forward(ctx: click.Context, message_id: str, to: str, comment: str) -> 
 @mail.command("move")
 @click.argument("message_id")
 @click.option("--folder", required=True, help="Destination folder name or ID")
+@json_option
 @click.pass_context
 def mail_move(ctx: click.Context, message_id: str, folder: str) -> None:
     """Move a message to a folder."""
@@ -466,6 +548,7 @@ def mail_move(ctx: click.Context, message_id: str, folder: str) -> None:
 
 @mail.command("delete")
 @click.argument("message_id")
+@json_option
 @click.pass_context
 def mail_delete(ctx: click.Context, message_id: str) -> None:
     """Delete an email message.
@@ -491,6 +574,7 @@ def mail_delete(ctx: click.Context, message_id: str) -> None:
 @click.argument("query")
 @click.option("--folder", default=None, help="Folder to search (default: all)")
 @click.option("--limit", default=25, help="Maximum results")
+@json_option
 @click.pass_context
 def mail_search(ctx: click.Context, query: str, folder: str | None, limit: int) -> None:
     """Search email messages."""
@@ -528,6 +612,7 @@ def mail_search(ctx: click.Context, query: str, folder: str | None, limit: int) 
 @mail.command("mark-read")
 @click.argument("message_id")
 @click.option("--unread", is_flag=True, help="Mark as unread instead")
+@json_option
 @click.pass_context
 def mail_mark_read(ctx: click.Context, message_id: str, unread: bool) -> None:
     """Mark a message as read (or unread with --unread)."""
@@ -548,6 +633,7 @@ def mail_mark_read(ctx: click.Context, message_id: str, unread: bool) -> None:
 
 @mail.command("archive")
 @click.argument("message_id")
+@json_option
 @click.pass_context
 def mail_archive(ctx: click.Context, message_id: str) -> None:
     """Archive a message (move to Archive folder)."""
@@ -567,12 +653,15 @@ def mail_archive(ctx: click.Context, message_id: str) -> None:
 
 @mail.command("attachments")
 @click.argument("message_id")
+@json_option
 @click.pass_context
 def mail_attachments(ctx: click.Context, message_id: str) -> None:
     """List attachments for a message."""
     try:
-        with GraphClient() as client:
-            attachments = client.get_all(f"/me/messages/{message_id}/attachments")
+        from officeclaw.mail import MailClient
+
+        with MailClient() as mc:
+            attachments = mc.list_attachments(message_id)
 
         if ctx.obj.get("json"):
             output_json(attachments)
@@ -589,13 +678,13 @@ def mail_attachments(ctx: click.Context, message_id: str) -> None:
         table.add_column("Inline")
 
         for att in attachments:
-            name = att.get("name", "(unnamed)")
-            content_type = att.get("contentType", "unknown")
             size = att.get("size", 0)
-            is_inline = "Yes" if att.get("isInline") else "No"
-            size_str = f"{size / 1024:.1f} KB" if size else "0 B"
-
-            table.add_row(name, content_type, size_str, is_inline)
+            table.add_row(
+                att.get("name", "(unnamed)"),
+                att.get("contentType", "unknown"),
+                f"{size / 1024:.1f} KB" if size else "0 B",
+                "Yes" if att.get("isInline") else "No",
+            )
 
         console.print(table)
     except Exception as e:
@@ -606,11 +695,16 @@ def mail_attachments(ctx: click.Context, message_id: str) -> None:
 @click.argument("message_id")
 @click.argument("attachment_name")
 @click.argument("output_path", required=False, default=None)
+@json_option
 @click.pass_context
-def mail_download(ctx: click.Context, message_id: str, attachment_name: str, output_path: str | None) -> None:
-    """Download an attachment from a message.
+def mail_download(
+    ctx: click.Context, message_id: str, attachment_name: str, output_path: str | None
+) -> None:
+    """Download one attachment from a message, by name.
 
-    Requires OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD=true in .env (disabled by default for safety).
+    Requires OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD=true in .env (disabled by
+    default for safety). With no OUTPUT_PATH the file goes to the default
+    download directory — see `mail download-all --help`.
     """
     require_capability("OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD", "Downloading attachments")
     try:
@@ -619,21 +713,18 @@ def mail_download(ctx: click.Context, message_id: str, attachment_name: str, out
         with MailClient() as mc:
             attachments = mc.list_attachments(message_id)
 
-            # Find attachment by name
             attachment_id = None
             for att in attachments:
                 if att.get("name", "").lower() == attachment_name.lower():
                     attachment_id = att.get("id")
                     break
 
-            if not attachment_id:
-                error_console.print(
-                    f"[red]Attachment not found:[/red] '{attachment_name}' on message {message_id}"
+            if attachment_id is None:
+                fail(
+                    f"Attachment not found: '{attachment_name}' on message {message_id}. "
+                    f"Run 'officeclaw mail attachments {message_id}' to list available attachments.",
+                    code="AttachmentNotFound",
                 )
-                error_console.print(
-                    f"Run [bold]officeclaw mail attachments {message_id}[/bold] to list available attachments."
-                )
-                sys.exit(1)
 
             downloaded_path = mc.download_attachment(
                 message_id, attachment_id, output_path=output_path
@@ -643,6 +734,51 @@ def mail_download(ctx: click.Context, message_id: str, attachment_name: str, out
             output_json({"downloaded": True, "path": downloaded_path})
         else:
             console.print(f"[green]✓[/green] Downloaded: {downloaded_path}")
+    except Exception as e:
+        handle_error(e)
+
+
+@mail.command("download-all")
+@click.argument("message_id")
+@click.option("--dest", default=None, help="Directory to save into [default: see below]")
+@click.option("--include-inline", is_flag=True, help="Also save inline images")
+@json_option
+@click.pass_context
+def mail_download_all(
+    ctx: click.Context, message_id: str, dest: str | None, include_inline: bool
+) -> None:
+    """Download every attachment on a message.
+
+    Requires OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD=true in .env, and applies the
+    same sender, size and type checks as `mail download`.
+
+    With no --dest, files go to OFFICECLAW_DOWNLOADS_DIR if set, otherwise to
+    officeclaw_downloads/ inside the first allowed attachment directory, or
+    inside your platform's Downloads folder when no allowlist is configured.
+
+    Filenames are taken from the message but reduced to a bare, portable name
+    before writing, and existing files are never overwritten. When
+    OFFICECLAW_ALLOWED_ATTACHMENT_DIRS is set, the destination must be inside it.
+    """
+    require_capability("OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD", "Downloading attachments")
+    try:
+        from officeclaw.mail import MailClient
+
+        with MailClient() as mc:
+            results = mc.download_attachments(message_id, dest, include_inline=include_inline)
+
+        if ctx.obj.get("json"):
+            output_json(results)
+            return
+
+        saved = [r for r in results if r.get("path")]
+        for result in results:
+            if result.get("path"):
+                console.print(f"[green]✓[/green] {result['name']} → {result['path']}")
+            else:
+                console.print(f"[dim]skipped {result['name']}: {result['skipped']}[/dim]")
+        if not saved:
+            console.print("[yellow]Nothing downloaded.[/yellow]")
     except Exception as e:
         handle_error(e)
 
@@ -662,8 +798,16 @@ def calendar() -> None:
 @click.option("--start", required=True, help="Start date (YYYY-MM-DD)")
 @click.option("--end", required=True, help="End date (YYYY-MM-DD)")
 @click.option("--limit", default=50, help="Maximum events")
+@click.option(
+    "--timezone",
+    default=None,
+    help='Return times in this timezone (e.g. "AUS Eastern Standard Time")',
+)
+@json_option
 @click.pass_context
-def calendar_list(ctx: click.Context, start: str, end: str, limit: int) -> None:
+def calendar_list(
+    ctx: click.Context, start: str, end: str, limit: int, timezone: str | None
+) -> None:
     """List calendar events in date range."""
     try:
         with GraphClient() as client:
@@ -674,7 +818,8 @@ def calendar_list(ctx: click.Context, start: str, end: str, limit: int) -> None:
                 "$orderby": "start/dateTime",
                 "$select": "id,subject,start,end,location,isAllDay",
             }
-            events = client.get_all("/me/calendarView", params=params, limit=limit)
+            headers = {"Prefer": f'outlook.timezone="{timezone}"'} if timezone else None
+            events = client.get_all("/me/calendarView", params=params, limit=limit, headers=headers)
 
             if ctx.obj.get("json"):
                 output_json(events)
@@ -707,6 +852,7 @@ def calendar_list(ctx: click.Context, start: str, end: str, limit: int) -> None:
 
 @calendar.command("get")
 @click.argument("event_id")
+@json_option
 @click.pass_context
 def calendar_get(ctx: click.Context, event_id: str) -> None:
     """Get a specific calendar event."""
@@ -741,25 +887,71 @@ def calendar_get(ctx: click.Context, event_id: str) -> None:
 @click.option("--start", required=True, help="Start datetime (YYYY-MM-DDTHH:MM:SS)")
 @click.option("--end", required=True, help="End datetime (YYYY-MM-DDTHH:MM:SS)")
 @click.option("--location", default="", help="Event location")
+@click.option("--body", default=None, help="Event description")
+@click.option("--attendee", multiple=True, help="Attendee email (repeatable)")
+@click.option("--timezone", default="UTC", help="Timezone for start/end (default: UTC)")
+@click.option("--all-day", is_flag=True, help="Create an all-day event")
+@click.option("--online-meeting", is_flag=True, help="Create a Teams meeting")
+@click.option(
+    "--recurrence",
+    type=click.Choice(sorted(CALENDAR_RECURRENCES)),
+    default=None,
+    help="Repeat the event",
+)
+@click.option("--recurrence-until", default=None, help="Last date of the series (YYYY-MM-DD)")
+@click.option("--recurrence-count", type=int, default=None, help="Number of occurrences")
+@json_option
 @click.pass_context
-def calendar_create(ctx: click.Context, subject: str, start: str, end: str, location: str) -> None:
+def calendar_create(
+    ctx: click.Context,
+    subject: str,
+    start: str,
+    end: str,
+    location: str,
+    body: str | None,
+    attendee: tuple[str, ...],
+    timezone: str,
+    all_day: bool,
+    online_meeting: bool,
+    recurrence: str | None,
+    recurrence_until: str | None,
+    recurrence_count: int | None,
+) -> None:
     """Create a calendar event."""
     try:
-        with GraphClient() as client:
-            event = {
-                "subject": subject,
-                "start": {"dateTime": start, "timeZone": "UTC"},
-                "end": {"dateTime": end, "timeZone": "UTC"},
-            }
-            if location:
-                event["location"] = {"displayName": location}
+        from officeclaw.calendar import CalendarClient
 
-            result = client.post("/me/events", event)
+        pattern = (
+            CalendarClient.build_recurrence(
+                recurrence,
+                start,
+                until=recurrence_until,
+                count=recurrence_count,
+                timezone=timezone,
+            )
+            if recurrence
+            else None
+        )
 
-            if ctx.obj.get("json"):
-                output_json(result)
-            else:
-                console.print(f"[green]✓[/green] Event created: {subject}")
+        with CalendarClient() as cc:
+            result = cc.create_event(
+                subject,
+                start,
+                end,
+                location=location or None,
+                body=body,
+                attendees=list(attendee) or None,
+                timezone=timezone,
+                is_all_day=all_day,
+                is_online_meeting=online_meeting,
+                recurrence=pattern,
+            )
+
+        if ctx.obj.get("json"):
+            output_json(result)
+        else:
+            repeat = f" (repeats {recurrence})" if recurrence else ""
+            console.print(f"[green]✓[/green] Event created: {subject}{repeat}")
 
     except Exception as e:
         handle_error(e)
@@ -772,6 +964,7 @@ def calendar_create(ctx: click.Context, subject: str, start: str, end: str, loca
 @click.option("--end", default=None, help="New end datetime")
 @click.option("--location", default=None, help="New location")
 @click.option("--body", default=None, help="New description")
+@json_option
 @click.pass_context
 def calendar_update(
     ctx: click.Context,
@@ -806,6 +999,7 @@ def calendar_update(
 
 @calendar.command("delete")
 @click.argument("event_id")
+@json_option
 @click.pass_context
 def calendar_delete(ctx: click.Context, event_id: str) -> None:
     """Delete a calendar event.
@@ -830,6 +1024,7 @@ def calendar_delete(ctx: click.Context, event_id: str) -> None:
 @calendar.command("accept")
 @click.argument("event_id")
 @click.option("--comment", default="", help="Response comment")
+@json_option
 @click.pass_context
 def calendar_accept(ctx: click.Context, event_id: str, comment: str) -> None:
     """Accept a meeting invitation."""
@@ -850,6 +1045,7 @@ def calendar_accept(ctx: click.Context, event_id: str, comment: str) -> None:
 @calendar.command("decline")
 @click.argument("event_id")
 @click.option("--comment", default="", help="Response comment")
+@json_option
 @click.pass_context
 def calendar_decline(ctx: click.Context, event_id: str, comment: str) -> None:
     """Decline a meeting invitation."""
@@ -868,6 +1064,7 @@ def calendar_decline(ctx: click.Context, event_id: str, comment: str) -> None:
 
 
 @calendar.command("list-calendars")
+@json_option
 @click.pass_context
 def calendar_list_calendars(ctx: click.Context) -> None:
     """List all calendars."""
@@ -911,6 +1108,7 @@ def tasks() -> None:
 
 
 @tasks.command("list-lists")
+@json_option
 @click.pass_context
 def tasks_list_lists(ctx: click.Context) -> None:
     """List all task lists."""
@@ -941,142 +1139,205 @@ def tasks_list_lists(ctx: click.Context) -> None:
         handle_error(e)
 
 
+def list_target_options(command: Any) -> Any:
+    """Add --list-id / --list-name. Neither is required; see resolve_list_id."""
+    command = click.option(
+        "--list-name", default=None, help="Task list name (alternative to --list-id)"
+    )(command)
+    return click.option("--list-id", default=None, help="Task list ID")(command)
+
+
+def split_categories(values: tuple[str, ...]) -> list[str] | None:
+    """Accept --category twice, or once with a comma-separated value."""
+    if not values:
+        return None
+    return [part.strip() for value in values for part in value.split(",") if part.strip()]
+
+
 @tasks.command("list")
-@click.option("--list-id", required=True, help="Task list ID")
+@list_target_options
 @click.option("--status", type=click.Choice(["all", "active", "completed"]), default="all")
+@click.option("--due-before", default=None, help="Only tasks due before this date (YYYY-MM-DD)")
+@click.option("--due-after", default=None, help="Only tasks due after this date (YYYY-MM-DD)")
+@click.option("--due-on", default=None, help="Only tasks due on this date (YYYY-MM-DD)")
+@click.option("--overdue", is_flag=True, help="Only tasks due before today and not completed")
+@click.option("--limit", type=int, default=None, help="Maximum tasks to return")
+@json_option
 @click.pass_context
-def tasks_list(ctx: click.Context, list_id: str, status: str) -> None:
-    """List tasks in a task list."""
+def tasks_list(
+    ctx: click.Context,
+    list_id: str | None,
+    list_name: str | None,
+    status: str,
+    due_before: str | None,
+    due_after: str | None,
+    due_on: str | None,
+    overdue: bool,
+    limit: int | None,
+) -> None:
+    """List tasks in a task list.
+
+    Date filters are applied client-side after fetching the list, because
+    Microsoft To Do cannot filter on due dates server-side.
+    """
     try:
-        with GraphClient() as client:
-            params: dict[str, Any] = {}
-            if status == "active":
-                params["$filter"] = "status ne 'completed'"
-            elif status == "completed":
-                params["$filter"] = "status eq 'completed'"
+        from officeclaw.tasks import TasksClient
 
-            tasks_list = client.get_all(f"/me/todo/lists/{list_id}/tasks", params=params or None)
+        with TasksClient() as tc:
+            resolved = tc.resolve_list_id(list_id=list_id, list_name=list_name)
+            tasks_found = tc.list_tasks(
+                resolved,
+                status=None if status == "all" else status,
+                limit=limit,
+                due_before=due_before,
+                due_after=due_after,
+                due_on=due_on,
+                overdue=overdue,
+            )
 
-            if ctx.obj.get("json"):
-                output_json(tasks_list)
-                return
+        if ctx.obj.get("json"):
+            output_json(tasks_found)
+            return
 
-            if not tasks_list:
-                console.print("[yellow]No tasks found.[/yellow]")
-                return
+        if not tasks_found:
+            console.print("[yellow]No tasks found.[/yellow]")
+            return
 
-            table = Table(title="Tasks")
-            table.add_column("Status")
-            table.add_column("Title", max_width=40)
-            table.add_column("Due", style="dim")
+        table = Table(title="Tasks")
+        table.add_column("Status")
+        table.add_column("Title", max_width=40)
+        table.add_column("Due", style="dim")
 
-            for task in tasks_list:
-                task_status = "✓" if task.get("status") == "completed" else "○"
-                title = task.get("title", "")[:40]
-                due = (
-                    task.get("dueDateTime", {}).get("dateTime", "")[:10]
-                    if task.get("dueDateTime")
-                    else ""
-                )
+        for task in tasks_found:
+            task_status = "✓" if task.get("status") == "completed" else "○"
+            title = task.get("title", "")[:40]
+            due = (
+                task.get("dueDateTime", {}).get("dateTime", "")[:10]
+                if task.get("dueDateTime")
+                else ""
+            )
+            table.add_row(task_status, title, due)
 
-                table.add_row(task_status, title, due)
-
-            console.print(table)
+        console.print(table)
 
     except Exception as e:
         handle_error(e)
 
 
 @tasks.command("create")
-@click.option("--list-id", required=True, help="Task list ID")
+@list_target_options
 @click.option("--title", required=True, help="Task title")
+@click.option("--body", default=None, help="Task description")
 @click.option("--due-date", default=None, help="Due date (YYYY-MM-DD)")
+@click.option(
+    "--importance",
+    type=click.Choice(["low", "normal", "high"]),
+    default="normal",
+    help="Importance",
+)
+@click.option("--reminder", default=None, help="Reminder datetime (YYYY-MM-DDTHH:MM:SS)")
+@click.option("--category", multiple=True, help="Category label (repeatable or comma-separated)")
+@json_option
 @click.pass_context
-def tasks_create(ctx: click.Context, list_id: str, title: str, due_date: str | None) -> None:
+def tasks_create(
+    ctx: click.Context,
+    list_id: str | None,
+    list_name: str | None,
+    title: str,
+    body: str | None,
+    due_date: str | None,
+    importance: str,
+    reminder: str | None,
+    category: tuple[str, ...],
+) -> None:
     """Create a new task."""
     try:
-        with GraphClient() as client:
-            task: dict[str, Any] = {"title": title}
-            if due_date:
-                task["dueDateTime"] = {
-                    "dateTime": f"{due_date}T00:00:00.0000000",
-                    "timeZone": "UTC",
-                }
+        from officeclaw.tasks import TasksClient
 
-            result = client.post(f"/me/todo/lists/{list_id}/tasks", task)
+        with TasksClient() as tc:
+            resolved = tc.resolve_list_id(list_id=list_id, list_name=list_name)
+            result = tc.create_task(
+                resolved,
+                title,
+                body=body,
+                due_date=due_date,
+                importance=importance,
+                reminder=reminder,
+                categories=split_categories(category),
+            )
 
-            if ctx.obj.get("json"):
-                output_json(result)
-            else:
-                console.print(f"[green]✓[/green] Task created: {title}")
+        if ctx.obj.get("json"):
+            output_json(result)
+        else:
+            console.print(f"[green]✓[/green] Task created: {title}")
 
     except Exception as e:
         handle_error(e)
 
 
 @tasks.command("complete")
-@click.option("--list-id", required=True, help="Task list ID")
+@list_target_options
 @click.option("--task-id", required=True, help="Task ID")
+@json_option
 @click.pass_context
-def tasks_complete(ctx: click.Context, list_id: str, task_id: str) -> None:
+def tasks_complete(
+    ctx: click.Context, list_id: str | None, list_name: str | None, task_id: str
+) -> None:
     """Mark a task as completed."""
     try:
-        from datetime import datetime, timezone
+        from officeclaw.tasks import TasksClient
 
-        with GraphClient() as client:
-            completed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
-            data = {
-                "status": "completed",
-                "completedDateTime": {
-                    "dateTime": completed_at,
-                    "timeZone": "UTC",
-                },
-            }
-            result = client.patch(f"/me/todo/lists/{list_id}/tasks/{task_id}", data)
+        with TasksClient() as tc:
+            resolved = tc.resolve_list_id(list_id=list_id, list_name=list_name)
+            result = tc.complete_task(resolved, task_id)
 
-            if ctx.obj.get("json"):
-                output_json(result)
-            else:
-                console.print("[green]✓[/green] Task marked as completed.")
+        if ctx.obj.get("json"):
+            output_json(result)
+        else:
+            console.print("[green]✓[/green] Task marked as completed.")
 
     except Exception as e:
         handle_error(e)
 
 
 @tasks.command("reopen")
-@click.option("--list-id", required=True, help="Task list ID")
+@list_target_options
 @click.option("--task-id", required=True, help="Task ID")
+@json_option
 @click.pass_context
-def tasks_reopen(ctx: click.Context, list_id: str, task_id: str) -> None:
+def tasks_reopen(
+    ctx: click.Context, list_id: str | None, list_name: str | None, task_id: str
+) -> None:
     """Reopen a completed task."""
     try:
-        with GraphClient() as client:
-            data = {
-                "status": "notStarted",
-                "completedDateTime": None,
-            }
-            result = client.patch(f"/me/todo/lists/{list_id}/tasks/{task_id}", data)
+        from officeclaw.tasks import TasksClient
 
-            if ctx.obj.get("json"):
-                output_json(result)
-            else:
-                console.print("[green]✓[/green] Task reopened.")
+        with TasksClient() as tc:
+            resolved = tc.resolve_list_id(list_id=list_id, list_name=list_name)
+            result = tc.reopen_task(resolved, task_id)
+
+        if ctx.obj.get("json"):
+            output_json(result)
+        else:
+            console.print("[green]✓[/green] Task reopened.")
 
     except Exception as e:
         handle_error(e)
 
 
 @tasks.command("get")
-@click.option("--list-id", required=True, help="Task list ID")
+@list_target_options
 @click.option("--task-id", required=True, help="Task ID")
+@json_option
 @click.pass_context
-def tasks_get(ctx: click.Context, list_id: str, task_id: str) -> None:
+def tasks_get(ctx: click.Context, list_id: str | None, list_name: str | None, task_id: str) -> None:
     """Get a specific task."""
     try:
         from officeclaw.tasks import TasksClient
 
         with TasksClient() as tc:
-            task = tc.get_task(list_id, task_id)
+            resolved = tc.resolve_list_id(list_id=list_id, list_name=list_name)
+            task = tc.get_task(resolved, task_id)
 
         if ctx.obj.get("json"):
             output_json(task)
@@ -1088,6 +1349,12 @@ def tasks_get(ctx: click.Context, list_id: str, task_id: str) -> None:
         due = task.get("dueDateTime")
         if due:
             console.print(f"[bold]Due:[/bold] {due.get('dateTime', '')[:10]}")
+        reminder = task.get("reminderDateTime")
+        if reminder:
+            console.print(f"[bold]Reminder:[/bold] {reminder.get('dateTime', '')[:16]}")
+        categories = task.get("categories") or []
+        if categories:
+            console.print(f"[bold]Categories:[/bold] {', '.join(categories)}")
         body = task.get("body", {}).get("content", "")
         if body:
             console.print()
@@ -1097,7 +1364,7 @@ def tasks_get(ctx: click.Context, list_id: str, task_id: str) -> None:
 
 
 @tasks.command("update")
-@click.option("--list-id", required=True, help="Task list ID")
+@list_target_options
 @click.option("--task-id", required=True, help="Task ID")
 @click.option("--title", default=None, help="New title")
 @click.option("--body", default=None, help="New description")
@@ -1105,28 +1372,37 @@ def tasks_get(ctx: click.Context, list_id: str, task_id: str) -> None:
 @click.option(
     "--importance", type=click.Choice(["low", "normal", "high"]), default=None, help="Importance"
 )
+@click.option("--reminder", default=None, help='New reminder datetime; "" clears it')
+@click.option("--category", multiple=True, help="Replacement category labels")
+@json_option
 @click.pass_context
 def tasks_update(
     ctx: click.Context,
-    list_id: str,
+    list_id: str | None,
+    list_name: str | None,
     task_id: str,
     title: str | None,
     body: str | None,
     due_date: str | None,
     importance: str | None,
+    reminder: str | None,
+    category: tuple[str, ...],
 ) -> None:
     """Update a task."""
     try:
         from officeclaw.tasks import TasksClient
 
         with TasksClient() as tc:
+            resolved = tc.resolve_list_id(list_id=list_id, list_name=list_name)
             result = tc.update_task(
-                list_id,
+                resolved,
                 task_id,
                 title=title,
                 body=body,
                 due_date=due_date,
                 importance=importance,
+                reminder=reminder,
+                categories=split_categories(category),
             )
 
         if ctx.obj.get("json"):
@@ -1138,10 +1414,13 @@ def tasks_update(
 
 
 @tasks.command("delete")
-@click.option("--list-id", required=True, help="Task list ID")
+@list_target_options
 @click.option("--task-id", required=True, help="Task ID")
+@json_option
 @click.pass_context
-def tasks_delete(ctx: click.Context, list_id: str, task_id: str) -> None:
+def tasks_delete(
+    ctx: click.Context, list_id: str | None, list_name: str | None, task_id: str
+) -> None:
     """Delete a task.
 
     Requires OFFICECLAW_ENABLE_DELETE=true in .env (disabled by default for safety).
@@ -1151,7 +1430,8 @@ def tasks_delete(ctx: click.Context, list_id: str, task_id: str) -> None:
         from officeclaw.tasks import TasksClient
 
         with TasksClient() as tc:
-            tc.delete_task(list_id, task_id)
+            resolved = tc.resolve_list_id(list_id=list_id, list_name=list_name)
+            tc.delete_task(resolved, task_id)
 
         if ctx.obj.get("json"):
             output_json({"deleted": True, "task_id": task_id})

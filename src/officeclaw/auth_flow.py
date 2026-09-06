@@ -8,19 +8,21 @@ Supports two modes:
 
 from __future__ import annotations
 
+import html
 import http.server
 import os
+import secrets
 import socketserver
 import threading
 import webbrowser
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from dotenv import load_dotenv
 from msal import ConfidentialClientApplication
 from rich.console import Console
 
 from officeclaw.auth import CACHE_FILE, TokenManager, _is_public_client_mode, _save_msal_cache
+from officeclaw.env import load_environment
 from officeclaw.exceptions import AuthenticationError, ConfigurationError
 
 console = Console()
@@ -40,7 +42,7 @@ def run_auth_flow() -> dict[str, Any]:
         AuthenticationError: If authentication fails
         ConfigurationError: If configuration is invalid
     """
-    load_dotenv()
+    load_environment()
 
     if _is_public_client_mode():
         return run_device_code_flow()
@@ -85,7 +87,7 @@ def run_device_code_flow() -> dict[str, Any]:
     # Poll for completion
     console.print("[dim]Waiting for authentication...[/dim]")
 
-    result = app.acquire_token_by_device_flow(flow)
+    result: dict[str, Any] = app.acquire_token_by_device_flow(flow)
 
     if "error" in result:
         error = result.get("error", "unknown_error")
@@ -119,16 +121,29 @@ def run_device_code_flow() -> dict[str, Any]:
 # ===========================================================================
 
 
-class AuthCallbackHandler(http.server.SimpleHTTPRequestHandler):
-    """HTTP handler for OAuth callback."""
+class AuthCallbackHandler(http.server.BaseHTTPRequestHandler):
+    """
+    HTTP handler for the OAuth callback.
+
+    Deliberately a BaseHTTPRequestHandler: SimpleHTTPRequestHandler would serve
+    the working directory for any request this class does not override.
+    """
 
     auth_code: str | None = None
     error: str | None = None
+    expected_state: str | None = None
 
     def do_GET(self) -> None:
         """Handle GET request (OAuth callback)."""
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
+
+        # Reject callbacks that did not originate from the request we started.
+        state = params.get("state", [""])[0]
+        if self.expected_state and not secrets.compare_digest(state, self.expected_state):
+            AuthCallbackHandler.error = "State mismatch — ignoring unexpected callback."
+            self._send_error("State mismatch")
+            return
 
         if "code" in params:
             AuthCallbackHandler.auth_code = params["code"][0]
@@ -144,7 +159,7 @@ class AuthCallbackHandler(http.server.SimpleHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/html")
         self.end_headers()
-        html = """
+        page = """
         <!DOCTYPE html>
         <html>
         <head>
@@ -163,14 +178,14 @@ class AuthCallbackHandler(http.server.SimpleHTTPRequestHandler):
         </body>
         </html>
         """
-        self.wfile.write(html.encode())
+        self.wfile.write(page.encode())
 
     def _send_error(self, message: str = "Authentication failed") -> None:
         """Send error response."""
         self.send_response(400)
         self.send_header("Content-type", "text/html")
         self.end_headers()
-        html = f"""
+        page = f"""
         <!DOCTYPE html>
         <html>
         <head>
@@ -185,11 +200,11 @@ class AuthCallbackHandler(http.server.SimpleHTTPRequestHandler):
         <body>
             <div class="error">✗</div>
             <h1>Authentication Failed</h1>
-            <p>{message}</p>
+            <p>{html.escape(message)}</p>
         </body>
         </html>
         """
-        self.wfile.write(html.encode())
+        self.wfile.write(page.encode())
 
     def log_message(self, format: str, *args: Any) -> None:
         """Suppress HTTP server logging."""
@@ -210,7 +225,7 @@ def run_authorization_code_flow() -> dict[str, Any]:
         AuthenticationError: If authentication fails
         ConfigurationError: If configuration is invalid
     """
-    load_dotenv()
+    load_environment()
 
     # Load configuration
     client_id = os.getenv("OFFICECLAW_CLIENT_ID") or TokenManager.DEFAULT_CLIENT_ID
@@ -241,10 +256,13 @@ def run_authorization_code_flow() -> dict[str, Any]:
         authority=authority,
     )
 
-    # Get authorization URL
+    # Get authorization URL. The state is echoed back on the callback and
+    # checked there, so another origin cannot feed us an authorization code.
+    state = secrets.token_urlsafe(32)
     auth_url = app.get_authorization_request_url(
         scopes=scopes,
         redirect_uri=redirect_uri,
+        state=state,
     )
 
     console.print("\n[bold]Outclaw Authentication (Authorization Code Flow)[/bold]\n")
@@ -255,9 +273,11 @@ def run_authorization_code_flow() -> dict[str, Any]:
     # Reset handler state
     AuthCallbackHandler.auth_code = None
     AuthCallbackHandler.error = None
+    AuthCallbackHandler.expected_state = state
 
-    # Start callback server
-    server = socketserver.TCPServer(("", port), AuthCallbackHandler)
+    # Start callback server on loopback only: ("", port) would accept the
+    # callback — and the authorization code in it — from anyone on the network.
+    server = socketserver.TCPServer(("127.0.0.1", port), AuthCallbackHandler)
     server_thread = threading.Thread(target=server.handle_request)
     server_thread.start()
 
@@ -280,7 +300,7 @@ def run_authorization_code_flow() -> dict[str, Any]:
     console.print("[dim]Exchanging code for tokens...[/dim]")
 
     # Exchange code for tokens
-    result = app.acquire_token_by_authorization_code(
+    result: dict[str, Any] = app.acquire_token_by_authorization_code(
         code=AuthCallbackHandler.auth_code,
         scopes=scopes,
         redirect_uri=redirect_uri,

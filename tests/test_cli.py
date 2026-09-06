@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
 
 
@@ -203,7 +204,7 @@ class TestTasksCommands:
 
         assert result.exit_code == 0
 
-    @patch("officeclaw.cli.GraphClient")
+    @patch("officeclaw.tasks.GraphClient")
     def test_tasks_complete(self, mock_client_class, sample_task):
         """Test completing a task."""
         from officeclaw.cli import main
@@ -211,8 +212,6 @@ class TestTasksCommands:
         mock_client = MagicMock()
         completed_task = {**sample_task, "status": "completed"}
         mock_client.patch.return_value = completed_task
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
         mock_client_class.return_value = mock_client
 
         runner = CliRunner()
@@ -222,20 +221,48 @@ class TestTasksCommands:
 
         assert result.exit_code == 0
 
-    def test_tasks_list_requires_list_id(self):
-        """Test tasks list requires list-id."""
+    @patch("officeclaw.tasks.GraphClient")
+    def test_tasks_list_falls_back_to_default_list(self, mock_client_class, sample_task_list):
+        """With no list argument, the built-in Tasks list is resolved."""
         from officeclaw.cli import main
 
-        runner = CliRunner()
-        result = runner.invoke(main, ["tasks", "list"])
+        mock_client = MagicMock()
+        mock_client.get_all.side_effect = [
+            [{**sample_task_list, "id": "default-123", "wellknownListName": "defaultList"}],
+            [],
+        ]
+        mock_client_class.return_value = mock_client
 
-        assert result.exit_code != 0
+        runner = CliRunner()
+        with patch("officeclaw.tasks.TasksClient._read_cache", return_value={}):
+            result = runner.invoke(main, ["tasks", "list"])
+
+        assert result.exit_code == 0
+        assert "default-123" in mock_client.get_all.call_args[0][0]
+
+    @patch("officeclaw.tasks.GraphClient")
+    def test_unknown_list_name_is_reported(self, mock_client_class, sample_task_list):
+        """An unresolvable --list-name fails with a usable message."""
+        from officeclaw.cli import main
+
+        mock_client = MagicMock()
+        mock_client.get_all.return_value = [{**sample_task_list, "displayName": "Tasks"}]
+        mock_client_class.return_value = mock_client
+
+        runner = CliRunner()
+        with patch("officeclaw.tasks.TasksClient._read_cache", return_value={}):
+            result = runner.invoke(main, ["tasks", "list", "--list-name", "Nope", "--json"])
+
+        assert result.exit_code == 1
+        payload = json.loads(result.output)
+        assert payload["status"] == "error"
+        assert payload["error"]["code"] == "TaskListError"
 
 
 class TestMailAttachmentCommands:
     """Test mail attachment-related CLI commands."""
 
-    @patch("officeclaw.cli.GraphClient")
+    @patch("officeclaw.mail.GraphClient")
     def test_mail_attachments_success(self, mock_client_class, sample_attachments):
         """Test successful mail attachments listing."""
         from officeclaw.cli import main
@@ -253,7 +280,7 @@ class TestMailAttachmentCommands:
         assert "meeting_notes.txt" in result.output
         assert "report.pdf" in result.output
 
-    @patch("officeclaw.cli.GraphClient")
+    @patch("officeclaw.mail.GraphClient")
     def test_mail_attachments_json(self, mock_client_class, sample_attachments):
         """Test mail attachments outputs valid JSON."""
         from officeclaw.cli import main
@@ -462,3 +489,308 @@ class TestCapabilityGates:
             result = runner.invoke(main, ["tasks", "delete", "--list-id", "l1", "--task-id", "t1"])
             assert result.exit_code != 0
             assert "OFFICECLAW_ENABLE_DELETE" in result.output
+
+
+class TestRecipientAllowlist:
+    """mail send honours OFFICECLAW_ALLOWED_RECIPIENTS."""
+
+    def setup_method(self):
+        import officeclaw.cli
+
+        officeclaw.cli._dotenv_loaded = True  # Prevent load_dotenv from loading .env
+
+    @staticmethod
+    def _run(to, tmp_path, env):
+        from officeclaw import policy
+        from officeclaw.cli import main
+
+        runner = CliRunner()
+        with (
+            patch.dict("os.environ", env, clear=True),
+            patch.object(policy, "LOG_DIR", tmp_path),
+            patch.object(policy, "BLOCK_LOG", tmp_path / "email-blocked.log"),
+            patch.object(policy, "ALERT_FILE", tmp_path / "email-alert.json"),
+            patch("officeclaw.cli.GraphClient") as mock_gc,
+        ):
+            mock_client = MagicMock()
+            mock_gc.return_value.__enter__ = MagicMock(return_value=mock_client)
+            mock_gc.return_value.__exit__ = MagicMock(return_value=False)
+            result = runner.invoke(
+                main, ["mail", "send", "--to", to, "--subject", "t", "--body", "b"]
+            )
+            return result, mock_client
+
+    def test_send_to_unlisted_address_is_blocked(self, tmp_path):
+        result, mock_client = self._run(
+            "mallory@evil.com",
+            tmp_path,
+            {
+                "OFFICECLAW_ENABLE_SEND": "true",
+                "OFFICECLAW_ALLOWED_RECIPIENTS": "alice@example.com",
+            },
+        )
+
+        assert result.exit_code == 1
+        assert "Blocked" in result.output
+        mock_client.post.assert_not_called()
+        assert "mallory@evil.com" in (tmp_path / "email-blocked.log").read_text()
+
+    def test_send_to_listed_address_proceeds(self, tmp_path):
+        result, mock_client = self._run(
+            "alice@example.com",
+            tmp_path,
+            {
+                "OFFICECLAW_ENABLE_SEND": "true",
+                "OFFICECLAW_ALLOWED_RECIPIENTS": "alice@example.com",
+            },
+        )
+
+        assert result.exit_code == 0
+        mock_client.post.assert_called_once()
+
+    def test_warning_when_no_allowlist_configured(self, tmp_path):
+        result, mock_client = self._run(
+            "anyone@anywhere.com", tmp_path, {"OFFICECLAW_ENABLE_SEND": "true"}
+        )
+
+        assert result.exit_code == 0
+        assert "No recipient allowlist configured" in result.output
+        mock_client.post.assert_called_once()
+
+
+class TestAttachmentAllowlist:
+    """mail send honours OFFICECLAW_ALLOWED_ATTACHMENT_DIRS."""
+
+    def setup_method(self):
+        import officeclaw.cli
+
+        officeclaw.cli._dotenv_loaded = True  # Prevent load_dotenv from loading .env
+
+    @staticmethod
+    def _run(attachment, tmp_path, env):
+        from officeclaw import policy
+        from officeclaw.cli import main
+
+        runner = CliRunner()
+        with (
+            patch.dict("os.environ", env, clear=True),
+            patch.object(policy, "LOG_DIR", tmp_path / "logs"),
+            patch.object(policy, "BLOCK_LOG", tmp_path / "logs" / "email-blocked.log"),
+            patch.object(policy, "ALERT_FILE", tmp_path / "logs" / "email-alert.json"),
+            patch("officeclaw.cli.GraphClient") as mock_gc,
+        ):
+            mock_client = MagicMock()
+            mock_gc.return_value.__enter__ = MagicMock(return_value=mock_client)
+            mock_gc.return_value.__exit__ = MagicMock(return_value=False)
+            result = runner.invoke(
+                main,
+                [
+                    "mail",
+                    "send",
+                    "--to",
+                    "alice@example.com",
+                    "--subject",
+                    "t",
+                    "--body",
+                    "b",
+                    "--attachment",
+                    str(attachment),
+                ],
+            )
+            return result, mock_client
+
+    def test_attachment_outside_allowed_dir_is_blocked(self, tmp_path):
+        wip = tmp_path / "wip"
+        wip.mkdir()
+        secret = tmp_path / "id_rsa"
+        secret.write_text("PRIVATE KEY")
+
+        result, mock_client = self._run(
+            secret,
+            tmp_path,
+            {
+                "OFFICECLAW_ENABLE_SEND": "true",
+                "OFFICECLAW_ALLOWED_RECIPIENTS": "alice@example.com",
+                "OFFICECLAW_ALLOWED_ATTACHMENT_DIRS": str(wip),
+            },
+        )
+
+        assert result.exit_code == 1
+        assert "Blocked" in result.output
+        mock_client.post.assert_not_called()
+
+    def test_attachment_inside_allowed_dir_is_sent(self, tmp_path):
+        wip = tmp_path / "wip"
+        wip.mkdir()
+        report = wip / "report.txt"
+        report.write_text("quarterly numbers")
+
+        result, mock_client = self._run(
+            report,
+            tmp_path,
+            {
+                "OFFICECLAW_ENABLE_SEND": "true",
+                "OFFICECLAW_ALLOWED_RECIPIENTS": "alice@example.com",
+                "OFFICECLAW_ALLOWED_ATTACHMENT_DIRS": str(wip),
+            },
+        )
+
+        assert result.exit_code == 0
+        payload = mock_client.post.call_args[0][1]
+        assert payload["message"]["attachments"][0]["name"] == "report.txt"
+
+    def test_warning_when_no_attachment_allowlist(self, tmp_path):
+        report = tmp_path / "report.txt"
+        report.write_text("quarterly numbers")
+
+        result, _ = self._run(
+            report,
+            tmp_path,
+            {
+                "OFFICECLAW_ENABLE_SEND": "true",
+                "OFFICECLAW_ALLOWED_RECIPIENTS": "alice@example.com",
+            },
+        )
+
+        assert result.exit_code == 0
+        assert "No attachment directory allowlist configured" in result.output
+
+
+class TestJSONContract:
+    """--json works in both positions, and covers failures as well as success."""
+
+    def setup_method(self):
+        import officeclaw.cli
+
+        officeclaw.cli._dotenv_loaded = True
+
+    @patch("officeclaw.tasks.GraphClient")
+    def test_flag_after_the_subcommand(self, mock_client_class, sample_task):
+        from officeclaw.cli import main
+
+        mock_client = MagicMock()
+        mock_client.get_all.return_value = [sample_task]
+        mock_client_class.return_value = mock_client
+
+        result = CliRunner().invoke(main, ["tasks", "list", "--list-id", "l1", "--json"])
+
+        assert result.exit_code == 0
+        assert json.loads(result.output)["status"] == "success"
+
+    @patch("officeclaw.tasks.GraphClient")
+    def test_flag_before_the_subcommand_still_works(self, mock_client_class, sample_task):
+        from officeclaw.cli import main
+
+        mock_client = MagicMock()
+        mock_client.get_all.return_value = [sample_task]
+        mock_client_class.return_value = mock_client
+
+        result = CliRunner().invoke(main, ["--json", "tasks", "list", "--list-id", "l1"])
+
+        assert result.exit_code == 0
+        assert json.loads(result.output)["status"] == "success"
+
+    @patch("officeclaw.tasks.GraphClient")
+    def test_errors_are_json_in_json_mode(self, mock_client_class):
+        from officeclaw.cli import main
+        from officeclaw.exceptions import GraphAPIError
+
+        mock_client = MagicMock()
+        mock_client.get_all.side_effect = GraphAPIError("ResourceNotFound", "Not found", 404)
+        mock_client_class.return_value = mock_client
+
+        result = CliRunner().invoke(main, ["tasks", "list", "--list-id", "l1", "--json"])
+
+        assert result.exit_code == 1
+        payload = json.loads(result.output)
+        assert payload["status"] == "error"
+        assert payload["error"]["code"] == "ResourceNotFound"
+
+    def test_capability_refusal_is_json(self):
+        from officeclaw.cli import main
+
+        with patch.dict("os.environ", {}, clear=True):
+            result = CliRunner().invoke(main, ["mail", "delete", "msg-1", "--json"])
+
+        assert result.exit_code == 1
+        payload = json.loads(result.output)
+        assert payload["error"]["code"] == "CapabilityDisabled"
+        assert "OFFICECLAW_ENABLE_DELETE" in payload["error"]["message"]
+
+    def test_human_output_is_unchanged_without_the_flag(self):
+        from officeclaw.cli import main
+
+        with patch.dict("os.environ", {}, clear=True):
+            result = CliRunner().invoke(main, ["mail", "delete", "msg-1"])
+
+        assert result.exit_code == 1
+        assert "OFFICECLAW_ENABLE_DELETE" in result.output
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(result.output)
+
+
+class TestTaskCreateFlags:
+    """tasks create exposes the metadata the library already supported."""
+
+    @patch("officeclaw.tasks.GraphClient")
+    def test_full_metadata_in_one_command(self, mock_client_class, sample_task):
+        from officeclaw.cli import main
+
+        mock_client = MagicMock()
+        mock_client.post.return_value = sample_task
+        mock_client_class.return_value = mock_client
+
+        result = CliRunner().invoke(
+            main,
+            [
+                "tasks",
+                "create",
+                "--list-id",
+                "l1",
+                "--title",
+                "Call accountant",
+                "--body",
+                "About GST registration",
+                "--due-date",
+                "2026-09-15",
+                "--importance",
+                "high",
+                "--reminder",
+                "2026-09-15T08:00:00",
+                "--category",
+                "finance,admin",
+            ],
+        )
+
+        assert result.exit_code == 0
+        payload = mock_client.post.call_args[0][1]
+        assert payload["title"] == "Call accountant"
+        assert payload["body"]["content"] == "About GST registration"
+        assert payload["importance"] == "high"
+        assert payload["isReminderOn"] is True
+        assert payload["categories"] == ["finance", "admin"]
+
+
+class TestAuthRefreshCommand:
+    @patch("officeclaw.cli.TokenManager")
+    def test_refresh_reports_json(self, mock_manager):
+        from officeclaw.cli import main
+
+        mock_manager.return_value.refresh.return_value = {"time_until_expiry_seconds": 3600}
+
+        result = CliRunner().invoke(main, ["auth", "refresh", "--json"])
+
+        assert result.exit_code == 0
+        assert json.loads(result.output)["data"]["time_until_expiry_seconds"] == 3600
+
+    @patch("officeclaw.cli.TokenManager")
+    def test_refresh_exits_nonzero_when_login_needed(self, mock_manager):
+        from officeclaw.cli import main
+        from officeclaw.exceptions import AuthenticationError
+
+        mock_manager.return_value.refresh.side_effect = AuthenticationError("login required")
+
+        result = CliRunner().invoke(main, ["auth", "refresh", "--json"])
+
+        assert result.exit_code == 1
+        assert json.loads(result.output)["error"]["code"] == "AuthenticationError"

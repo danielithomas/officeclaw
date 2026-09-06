@@ -7,17 +7,20 @@ Provides email management through Microsoft Graph API.
 from __future__ import annotations
 
 import base64
+import json
 import os
-import re
 from pathlib import Path
 from typing import Any
 
+from officeclaw import policy
 from officeclaw.client import GraphClient
 from officeclaw.exceptions import (
     AttachmentSecurityError,
     AttachmentSizeError,
     AttachmentTypeError,
+    GraphAPIError,
 )
+
 
 class MailClient:
     """
@@ -51,16 +54,20 @@ class MailClient:
             limit: Maximum messages to return
             filter_query: OData filter expression
             search: Search query
-            order_by: Sort order
+            order_by: Sort order. Ignored when ``search`` is given, and dropped
+                automatically if Graph rejects it for the chosen filter
+                (``InefficientFilter``); pass None to never request ordering.
             select: Fields to return
 
         Returns:
             List of message objects
         """
-        params: dict[str, Any] = {
-            "$top": limit,
-            "$orderby": order_by,
-        }
+        params: dict[str, Any] = {"$top": limit}
+
+        # Graph rejects $search combined with $orderby (400 InefficientFilter),
+        # so search results keep the service's own relevance ordering.
+        if not search:
+            params["$orderby"] = order_by
 
         if select:
             params["$select"] = select
@@ -76,7 +83,18 @@ class MailClient:
             params["$search"] = f'"{search}"'
 
         endpoint = f"/me/mailFolders/{folder}/messages"
-        return self._client.get_all(endpoint, params=params, limit=limit)
+
+        try:
+            return self._client.get_all(endpoint, params=params, limit=limit)
+        except GraphAPIError as e:
+            if e.code != "InefficientFilter" or "$orderby" not in params:
+                raise
+            # Graph will only sort a filtered collection when it has an index
+            # for that pairing: "isRead eq false" sorts by receivedDateTime,
+            # "hasAttachments eq true" does not. Returning unordered results
+            # beats failing the whole query.
+            unordered = {key: value for key, value in params.items() if key != "$orderby"}
+            return self._client.get_all(endpoint, params=unordered, limit=limit)
 
     def get_message(self, message_id: str) -> dict[str, Any]:
         """
@@ -88,7 +106,8 @@ class MailClient:
         Returns:
             Message object with full details
         """
-        return self._client.get(f"/me/messages/{message_id}")
+        message: dict[str, Any] = self._client.get(f"/me/messages/{message_id}")
+        return message
 
     def send_message(
         self,
@@ -120,32 +139,27 @@ class MailClient:
         cc_list = [cc] if isinstance(cc, str) else (cc or [])
         bcc_list = [bcc] if isinstance(bcc, str) else (bcc or [])
 
-        message = {
-            "message": {
-                "subject": subject,
-                "body": {
-                    "contentType": content_type,
-                    "content": body,
-                },
-                "toRecipients": [{"emailAddress": {"address": addr}} for addr in to_list],
+        policy.check_recipients([*to_list, *cc_list, *bcc_list], action="send", subject=subject)
+
+        draft: dict[str, Any] = {
+            "subject": subject,
+            "body": {
+                "contentType": content_type,
+                "content": body,
             },
-            "saveToSentItems": save_to_sent,
+            "toRecipients": [{"emailAddress": {"address": addr}} for addr in to_list],
         }
 
         if cc_list:
-            message["message"]["ccRecipients"] = [
-                {"emailAddress": {"address": addr}} for addr in cc_list
-            ]
+            draft["ccRecipients"] = [{"emailAddress": {"address": addr}} for addr in cc_list]
 
         if bcc_list:
-            message["message"]["bccRecipients"] = [
-                {"emailAddress": {"address": addr}} for addr in bcc_list
-            ]
+            draft["bccRecipients"] = [{"emailAddress": {"address": addr}} for addr in bcc_list]
 
         if attachments:
-            message["message"]["attachments"] = attachments
+            draft["attachments"] = attachments
 
-        self._client.post("/me/sendMail", message)
+        self._client.post("/me/sendMail", {"message": draft, "saveToSentItems": save_to_sent})
 
     def reply(
         self,
@@ -161,8 +175,60 @@ class MailClient:
             body: Reply body
             reply_all: Reply to all recipients
         """
+        action = "reply-all" if reply_all else "reply"
+        if policy.get_allowed_recipients() is not None:
+            # Graph decides the recipients server-side, so resolve them here to
+            # check them; skipped entirely when no allowlist is configured.
+            policy.check_recipients(
+                self._reply_recipients(message_id, reply_all=reply_all), action=action
+            )
+
         endpoint = f"/me/messages/{message_id}/{'replyAll' if reply_all else 'reply'}"
         self._client.post(endpoint, {"comment": body})
+
+    def _reply_recipients(self, message_id: str, reply_all: bool) -> list[str]:
+        """
+        Resolve the addresses a reply to this message would be delivered to.
+
+        Mirrors Graph's own behaviour: replies go to replyTo when present and
+        the sender otherwise; reply-all adds the original to/cc recipients,
+        minus the mailbox owner.
+        """
+        message = self._client.get(
+            f"/me/messages/{message_id}",
+            params={"$select": "from,replyTo,toRecipients,ccRecipients"},
+        )
+
+        entries = list(message.get("replyTo") or [])
+        if not entries and message.get("from"):
+            entries.append(message["from"])
+        if reply_all:
+            entries.extend(message.get("toRecipients") or [])
+            entries.extend(message.get("ccRecipients") or [])
+
+        owner = self._owner_address()
+        addresses = []
+        for entry in entries:
+            address = (entry.get("emailAddress") or {}).get("address", "")
+            if not address:
+                continue
+            if owner and address.lower() == owner:
+                continue  # A reply is never delivered to the mailbox owner.
+            addresses.append(address)
+        return addresses
+
+    def _owner_address(self) -> str | None:
+        """
+        Address of the signed-in mailbox, when it can be determined.
+
+        Best-effort: if it cannot be read, every recipient is checked instead,
+        which only ever makes the allowlist stricter.
+        """
+        try:
+            username = self._client.token_manager.get_account_username()
+        except Exception:
+            return None
+        return username.lower() if username else None
 
     def forward(
         self,
@@ -179,6 +245,8 @@ class MailClient:
             comment: Optional comment
         """
         to_list = [to] if isinstance(to, str) else to
+        policy.check_recipients(to_list, action="forward")
+
         data = {
             "comment": comment,
             "toRecipients": [{"emailAddress": {"address": addr}} for addr in to_list],
@@ -198,10 +266,11 @@ class MailClient:
         """
         # Get folder ID if name provided
         folder_id = self._get_folder_id(folder)
-        return self._client.post(
+        moved: dict[str, Any] = self._client.post(
             f"/me/messages/{message_id}/move",
             {"destinationId": folder_id},
         )
+        return moved
 
     def delete(self, message_id: str) -> None:
         """Delete a message."""
@@ -218,10 +287,11 @@ class MailClient:
         Returns:
             Updated message object
         """
-        return self._client.patch(
+        updated: dict[str, Any] = self._client.patch(
             f"/me/messages/{message_id}",
             {"isRead": is_read},
         )
+        return updated
 
     def archive(self, message_id: str) -> dict[str, Any]:
         """
@@ -235,17 +305,30 @@ class MailClient:
         """
         return self.move(message_id, "archive")
 
+    # ------------------------------------------------------------------
+    # Attachments
+    # ------------------------------------------------------------------
+    #
+    # Downloading is gated three ways, in this order: the capability gate, the
+    # sender allowlist, then size and type limits. Where the file may be
+    # written is a fourth, separate question, handled by officeclaw.policy —
+    # the same allowlist that governs which files may be attached to outgoing
+    # mail. Bulk download runs each attachment through the identical checks.
+
     def list_attachments(self, message_id: str) -> list[dict[str, Any]]:
         """
-        List all attachments for a message.
+        List a message's attachments, without their content.
 
         Args:
             message_id: Message ID
 
         Returns:
-            List of attachment metadata (id, name, contentType, size, isInline)
+            Attachment metadata: id, name, contentType, size, isInline
         """
-        return self._client.get_all(f"/me/messages/{message_id}/attachments")
+        return self._client.get_all(
+            f"/me/messages/{message_id}/attachments",
+            params={"$select": "id,name,contentType,size,isInline"},
+        )
 
     def download_attachment(
         self,
@@ -254,103 +337,174 @@ class MailClient:
         output_path: str | None = None,
     ) -> str:
         """
-        Download an attachment to local storage with security validation.
+        Download one attachment to local storage, with security validation.
 
         Args:
             message_id: Message ID
             attachment_id: Attachment ID from list_attachments
-            output_path: Destination path (default: auto-generated)
+            output_path: Destination file path (default: auto-generated)
 
         Returns:
-            Path to downloaded file
+            Path to the downloaded file
 
         Raises:
-            AttachmentSecurityError: If sender not in safe senders list
-            AttachmentSizeError: If file exceeds configured max size
-            AttachmentTypeError: If MIME type not in allowed types
+            AttachmentSecurityError: If downloading is disabled, or the sender
+                is not in the safe senders list
+            AttachmentSizeError: If the file exceeds the configured max size
+            AttachmentTypeError: If the MIME type is not in the allowed types
+            AttachmentNotAllowedError: If the destination is outside
+                OFFICECLAW_ALLOWED_ATTACHMENT_DIRS
         """
-        # 1. Check master capability gate
+        self._require_download_enabled()
+        self._require_safe_sender(message_id)
+
+        attachment_meta = self._client.get(f"/me/messages/{message_id}/attachments/{attachment_id}")
+        self._require_allowed_size_and_type(attachment_meta)
+
+        save_path = self._resolve_save_path(attachment_meta, output_path)
+
+        # File attachments carry base64 contentBytes; anything else is a link
+        # or a nested message, and its metadata is saved instead.
+        if attachment_meta.get("@odata.type") == "#microsoft.graph.fileAttachment":
+            save_path.write_bytes(self._attachment_bytes(message_id, attachment_meta))
+        else:
+            save_path = self._resolve_collision(save_path.with_suffix(".json"))
+            save_path.write_text(json.dumps(attachment_meta, indent=2, default=str))
+
+        return str(save_path)
+
+    def download_attachments(
+        self,
+        message_id: str,
+        dest_dir: str | Path | None = None,
+        include_inline: bool = False,
+    ) -> list[dict[str, Any]]:
+        """
+        Save all of a message's attachments to a directory.
+
+        Every attachment goes through the same checks as
+        :meth:`download_attachment`; one that fails a size or type limit is
+        reported as skipped rather than aborting the rest.
+
+        Args:
+            message_id: Message to read
+            dest_dir: Directory to write into, created if absent. Defaults to
+                :func:`officeclaw.policy.default_download_dir`.
+            include_inline: Also save inline images
+
+        Returns:
+            One record per attachment: name, and either path or skipped reason
+        """
+        self._require_download_enabled()
+        self._require_safe_sender(message_id)
+
+        directory = policy.check_download_dir(
+            policy.default_download_dir() if dest_dir is None else dest_dir
+        )
+        directory.mkdir(parents=True, exist_ok=True)
+
+        results: list[dict[str, Any]] = []
+        for attachment in self.list_attachments(message_id):
+            name = attachment.get("name")
+
+            if attachment.get("isInline") and not include_inline:
+                results.append({"name": name, "skipped": "inline"})
+                continue
+
+            target = directory / policy.safe_attachment_name(name)
+            try:
+                path = self.download_attachment(
+                    message_id, attachment["id"], output_path=str(target)
+                )
+            except (AttachmentSizeError, AttachmentTypeError) as e:
+                results.append({"name": name, "skipped": str(e)})
+                continue
+
+            results.append({"name": name, "path": path, "size": Path(path).stat().st_size})
+
+        return results
+
+    # --- checks, shared by both download paths ---
+
+    @staticmethod
+    def _require_download_enabled() -> None:
+        """Refuse unless OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD is set."""
         if os.environ.get("OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD", "").lower() not in (
             "true",
             "1",
             "yes",
         ):
             raise AttachmentSecurityError(
-                "Attachment download is disabled. To enable, set OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD=true in your .env file."
+                "Attachment download is disabled. To enable, set "
+                "OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD=true in your .env file."
             )
 
-        # 2. Fetch message metadata to check sender
+    def _require_safe_sender(self, message_id: str) -> None:
+        """Refuse messages from senders outside the safe list, when enforced."""
+        if os.environ.get("OFFICECLAW_SAFE_SENDERS_ONLY", "").lower() not in ("true", "1", "yes"):
+            return
+
         message = self._client.get(f"/me/messages/{message_id}")
-        sender_email = (
-            message.get("from", {}).get("emailAddress", {}).get("address", "").lower()
-        )
+        sender = message.get("from", {}).get("emailAddress", {}).get("address", "").lower()
 
-        # 3. Validate safe senders if enabled
-        safe_senders_only = (
-            os.environ.get("OFFICECLAW_SAFE_SENDERS_ONLY", "").lower() in ("true", "1", "yes")
-        )
-        if safe_senders_only:
-            safe_list_env = os.environ.get("OFFICECLAW_SAFE_SENDERS_LIST", "")
-            safe_list = [s.strip() for s in safe_list_env.split(",") if s.strip()]
-            if not self._is_safe_sender(sender_email, safe_list):
-                raise AttachmentSecurityError(
-                    f'Sender "{sender_email}" is not in the safe senders list. '
-                    f"To allow, add to OFFICECLAW_SAFE_SENDERS_LIST in your .env file."
-                )
+        safe_list_env = os.environ.get("OFFICECLAW_SAFE_SENDERS_LIST", "")
+        safe_list = [s.strip() for s in safe_list_env.split(",") if s.strip()]
+        if not self._is_safe_sender(sender, safe_list):
+            raise AttachmentSecurityError(
+                f'Sender "{sender}" is not in the safe senders list. '
+                "To allow, add to OFFICECLAW_SAFE_SENDERS_LIST in your .env file."
+            )
 
-        # 4. Fetch attachment metadata to check size/type
-        attachment_meta = self._client.get(
-            f"/me/messages/{message_id}/attachments/{attachment_id}"
-        )
-        attachment_size = attachment_meta.get("size", 0)
-        content_type = attachment_meta.get("contentType", "application/octet-stream")
-        attachment_name = attachment_meta.get("name", "unnamed")
-
-        # 5. Validate max size
+    def _require_allowed_size_and_type(self, attachment_meta: dict[str, Any]) -> None:
+        """Apply the configured size ceiling and MIME type allowlist."""
+        size = attachment_meta.get("size", 0)
         max_size_mb = int(os.environ.get("OFFICECLAW_ATTACHMENT_MAX_SIZE_MB", "25"))
-        max_size_bytes = max_size_mb * 1024 * 1024
-        if attachment_size > max_size_bytes:
-            raise AttachmentSizeError(attachment_size, max_size_mb)
+        if size > max_size_mb * 1024 * 1024:
+            raise AttachmentSizeError(size, max_size_mb)
 
-        # 6. Validate MIME type
+        content_type = attachment_meta.get("contentType", "application/octet-stream")
         allowed_types_env = os.environ.get("OFFICECLAW_ATTACHMENT_ALLOWED_TYPES", "")
         if allowed_types_env and allowed_types_env.strip() != "*":
             allowed_types = [t.strip() for t in allowed_types_env.split(",") if t.strip()]
             if not self._is_allowed_mime_type(content_type, allowed_types):
                 raise AttachmentTypeError(content_type, allowed_types)
 
-        # 7. Determine output path
+    def _resolve_save_path(self, attachment_meta: dict[str, Any], output_path: str | None) -> Path:
+        """
+        Decide where to write, and confirm the directory is permitted.
+
+        An explicit path is honoured, but its directory is checked like any
+        other: an attachment must not be writable outside the configured
+        directories just because a caller named the path.
+        """
         if output_path:
-            save_path = Path(output_path)
+            target = Path(output_path).expanduser()
+            directory = policy.check_download_dir(target.parent)
+            save_path = directory / policy.safe_attachment_name(target.name)
         else:
-            download_dir_env = os.environ.get(
-                "OFFICECLAW_ATTACHMENT_DOWNLOAD_PATH", "./downloads"
+            directory = policy.check_download_dir(policy.default_download_dir())
+            save_path = directory / policy.safe_attachment_name(
+                attachment_meta.get("name"), fallback="unnamed"
             )
-            download_dir = Path(download_dir_env).expanduser()
-            download_dir.mkdir(parents=True, exist_ok=True)
-            save_path = download_dir / self._sanitize_filename(attachment_name)
 
-        # Handle filename collisions
-        save_path = self._resolve_collision(save_path)
+        directory.mkdir(parents=True, exist_ok=True)
+        return self._resolve_collision(save_path)
 
-        # 8. Extract and save content
-        # File attachments contain base64 contentBytes
-        if attachment_meta.get("@odata.type") == "#microsoft.graph.fileAttachment":
-            content_bytes_b64 = attachment_meta.get("contentBytes", "")
-            if content_bytes_b64:
-                content_bytes = base64.b64decode(content_bytes_b64)
-                save_path.write_bytes(content_bytes)
-            else:
-                save_path.write_bytes(b"")
-        else:
-            # itemAttachment or referenceAttachment — write metadata instead
-            import json
+    def _attachment_bytes(self, message_id: str, attachment: dict[str, Any]) -> bytes:
+        """
+        Content of one file attachment.
 
-            save_path = save_path.with_suffix(".json")
-            save_path = self._resolve_collision(save_path)
-            save_path.write_text(json.dumps(attachment_meta, indent=2, default=str))
+        Graph inlines ``contentBytes`` for most attachments; when it does not,
+        the value has to be fetched from ``/$value``. Falling back beats
+        writing the empty file that a missing ``contentBytes`` would produce.
+        """
+        content_bytes = attachment.get("contentBytes")
+        if content_bytes:
+            return base64.b64decode(content_bytes)
 
-        return str(save_path)
+        return self._client.get_binary(
+            f"/me/messages/{message_id}/attachments/{attachment['id']}/$value"
+        )
 
     def _is_safe_sender(self, from_address: str, safe_list: list[str]) -> bool:
         """Check if sender is in the safe senders list."""
@@ -376,29 +530,12 @@ class MailClient:
         return False
 
     def _sanitize_filename(self, filename: str) -> str:
-        """Sanitise filename to prevent path traversal."""
-        # Remove path traversal components
-        filename = os.path.basename(filename)
-        # Remove potentially dangerous characters while preserving common filename chars
-        filename = re.sub(r'[^\w\s\.\-\(\)\[\]_]', "_", filename)
-        # Prevent empty names
-        if not filename or filename in (".", ".."):
-            filename = "unnamed"
-        return filename
+        """Reduce a filename to a bare, portable name (see officeclaw.policy)."""
+        return policy.safe_attachment_name(filename, fallback="unnamed")
 
     def _resolve_collision(self, save_path: Path) -> Path:
         """Handle filename collisions by appending (1), (2), etc."""
-        if not save_path.exists():
-            return save_path
-        stem = save_path.stem
-        suffix = save_path.suffix
-        parent = save_path.parent
-        counter = 1
-        while True:
-            new_path = parent / f"{stem}({counter}){suffix}"
-            if not new_path.exists():
-                return new_path
-            counter += 1
+        return policy.unique_path(save_path.parent, save_path.name)
 
     def search(
         self,

@@ -9,18 +9,44 @@ from __future__ import annotations
 import os
 import time
 from collections.abc import Generator
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urljoin
 
 import requests
-from dotenv import load_dotenv
 
 from officeclaw.auth import TokenManager
+from officeclaw.env import load_environment
 from officeclaw.exceptions import (
     AuthenticationError,
     GraphAPIError,
     RateLimitError,
 )
+
+
+def _parse_retry_after(value: str | None, default: int) -> int:
+    """
+    Read a Retry-After header.
+
+    RFC 9110 allows either a delay in seconds or an HTTP-date; int() alone
+    raises on the latter, turning a rate limit into an unhandled error.
+    """
+    if not value:
+        return default
+
+    value = value.strip()
+    if value.isdigit():
+        return int(value)
+
+    try:
+        retry_at = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return default
+
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=timezone.utc)
+    return max(0, int((retry_at - datetime.now(timezone.utc)).total_seconds()))
 
 
 class GraphClient:
@@ -46,7 +72,7 @@ class GraphClient:
         Args:
             token_manager: TokenManager instance (creates new if not provided)
         """
-        load_dotenv()
+        load_environment()
 
         self.token_manager = token_manager or TokenManager()
         self.base_url = os.getenv(
@@ -84,10 +110,12 @@ class GraphClient:
         base = self.base_url.rstrip("/") + "/"
         return urljoin(base, endpoint.lstrip("/"))
 
-    def _handle_response(self, response: requests.Response) -> Any:
+    def _handle_response(self, response: requests.Response, raw: bool = False) -> Any:
         """Handle API response and errors."""
         # Success
         if response.status_code in (200, 201, 202):
+            if raw:
+                return response.content
             return response.json() if response.content else None
 
         # No content (successful delete)
@@ -112,7 +140,9 @@ class GraphClient:
         elif response.status_code == 404:
             raise GraphAPIError("ResourceNotFound", f"Not found: {error_message}", 404)
         elif response.status_code == 429:
-            retry_after = int(response.headers.get("Retry-After", self.rate_limit_wait))
+            retry_after = _parse_retry_after(
+                response.headers.get("Retry-After"), self.rate_limit_wait
+            )
             raise RateLimitError("Rate limit exceeded", retry_after)
         else:
             raise GraphAPIError(error_code, error_message, response.status_code)
@@ -125,10 +155,14 @@ class GraphClient:
         data: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
         retry_count: int = 0,
+        raw: bool = False,
     ) -> Any:
         """Make HTTP request with retries and error handling."""
         url = self._build_url(endpoint)
         request_headers = self._get_headers(headers)
+        if raw:
+            # Attachment content is bytes, not JSON.
+            request_headers["Accept"] = "*/*"
 
         try:
             response = self._session.request(
@@ -139,26 +173,32 @@ class GraphClient:
                 json=data,
                 timeout=self.request_timeout,
             )
-            return self._handle_response(response)
+            return self._handle_response(response, raw=raw)
 
         except RateLimitError as e:
             if retry_count < self.max_retries:
                 wait_time = e.retry_after or (2**retry_count * self.rate_limit_wait)
                 time.sleep(wait_time)
-                return self._make_request(method, endpoint, params, data, headers, retry_count + 1)
+                return self._make_request(
+                    method, endpoint, params, data, headers, retry_count + 1, raw
+                )
             raise
 
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
             if retry_count < self.max_retries:
                 time.sleep(2**retry_count)
-                return self._make_request(method, endpoint, params, data, headers, retry_count + 1)
+                return self._make_request(
+                    method, endpoint, params, data, headers, retry_count + 1, raw
+                )
             raise GraphAPIError("NetworkError", str(e)) from e
 
         except AuthenticationError:
             if retry_count == 0:
                 # Force token refresh and retry once
-                self.token_manager._cached_tokens = None
-                return self._make_request(method, endpoint, params, data, headers, retry_count + 1)
+                self.token_manager.invalidate_cache()
+                return self._make_request(
+                    method, endpoint, params, data, headers, retry_count + 1, raw
+                )
             raise
 
     def get(
@@ -182,11 +222,22 @@ class GraphClient:
         """Make DELETE request."""
         self._make_request("DELETE", endpoint)
 
+    def get_binary(self, endpoint: str) -> bytes:
+        """
+        GET an endpoint that returns bytes rather than JSON.
+
+        Used for attachment content (``/$value``), which the JSON response
+        handling would otherwise try to decode.
+        """
+        content: bytes = self._make_request("GET", endpoint, raw=True)
+        return content
+
     def get_paginated(
         self,
         endpoint: str,
         params: dict[str, Any] | None = None,
         limit: int | None = None,
+        headers: dict[str, str] | None = None,
     ) -> Generator[dict[str, Any], None, None]:
         """
         Get paginated results from API.
@@ -195,6 +246,7 @@ class GraphClient:
             endpoint: API endpoint
             params: Query parameters
             limit: Maximum items to return
+            headers: Extra request headers, applied to every page
 
         Yields:
             Individual items from response
@@ -204,9 +256,9 @@ class GraphClient:
 
         while next_url:
             if next_url.startswith("http"):
-                response = self._make_request("GET", next_url)
+                response = self._make_request("GET", next_url, headers=headers)
             else:
-                response = self._make_request("GET", next_url, params=params)
+                response = self._make_request("GET", next_url, params=params, headers=headers)
                 params = None  # Only use params on first request
 
             items = response.get("value", [])
@@ -224,9 +276,10 @@ class GraphClient:
         endpoint: str,
         params: dict[str, Any] | None = None,
         limit: int | None = None,
+        headers: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
         """Get all items from paginated endpoint as a list."""
-        return list(self.get_paginated(endpoint, params, limit))
+        return list(self.get_paginated(endpoint, params, limit, headers))
 
     def close(self) -> None:
         """Close the HTTP session."""

@@ -183,7 +183,12 @@ class TestMailClient:
         attachments = client.list_attachments("msg-123")
 
         assert len(attachments) == 2
-        mock_client.get_all.assert_called_with("/me/messages/msg-123/attachments")
+        # $select keeps contentBytes out of a listing: without it, listing a
+        # message's attachments downloads all of them.
+        mock_client.get_all.assert_called_with(
+            "/me/messages/msg-123/attachments",
+            params={"$select": "id,name,contentType,size,isInline"},
+        )
 
     @patch("officeclaw.mail.GraphClient")
     def test_download_attachment_success(self, mock_client_class, sample_attachments):
@@ -325,3 +330,68 @@ class TestMailClient:
 
         del os.environ["OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD"]
         del os.environ["OFFICECLAW_ATTACHMENT_ALLOWED_TYPES"]
+
+
+class TestSearchOrdering:
+    """Graph rejects $search combined with $orderby."""
+
+    @patch("officeclaw.mail.GraphClient")
+    def test_orderby_dropped_when_searching(self, mock_client_class):
+        from officeclaw.mail import MailClient
+
+        mock_client = MagicMock()
+        mock_client.get_all.return_value = []
+        mock_client_class.return_value = mock_client
+
+        MailClient().list_messages(search="invoice")
+
+        params = mock_client.get_all.call_args[1]["params"]
+        assert params["$search"] == '"invoice"'
+        assert "$orderby" not in params
+
+    @patch("officeclaw.mail.GraphClient")
+    def test_orderby_kept_without_search(self, mock_client_class):
+        from officeclaw.mail import MailClient
+
+        mock_client = MagicMock()
+        mock_client.get_all.return_value = []
+        mock_client_class.return_value = mock_client
+
+        MailClient().list_messages()
+
+        params = mock_client.get_all.call_args[1]["params"]
+        assert params["$orderby"] == "receivedDateTime desc"
+
+    @patch("officeclaw.mail.GraphClient")
+    def test_ordering_dropped_when_graph_rejects_the_filter(self, mock_client_class):
+        """Graph raises InefficientFilter for some filter/sort pairings."""
+        from officeclaw.exceptions import GraphAPIError
+        from officeclaw.mail import MailClient
+
+        mock_client = MagicMock()
+        mock_client.get_all.side_effect = [
+            GraphAPIError("InefficientFilter", "too complex", 400),
+            [{"id": "msg-1"}],
+        ]
+        mock_client_class.return_value = mock_client
+
+        messages = MailClient().list_messages(filter_query="hasAttachments eq true")
+
+        assert messages == [{"id": "msg-1"}]
+        first, second = mock_client.get_all.call_args_list
+        assert "$orderby" in first[1]["params"]
+        assert "$orderby" not in second[1]["params"]
+
+    @patch("officeclaw.mail.GraphClient")
+    def test_other_graph_errors_are_not_retried(self, mock_client_class):
+        from officeclaw.exceptions import GraphAPIError
+        from officeclaw.mail import MailClient
+
+        mock_client = MagicMock()
+        mock_client.get_all.side_effect = GraphAPIError("AccessDenied", "nope", 403)
+        mock_client_class.return_value = mock_client
+
+        with pytest.raises(GraphAPIError):
+            MailClient().list_messages(filter_query="hasAttachments eq true")
+
+        assert mock_client.get_all.call_count == 1
