@@ -48,7 +48,7 @@ officeclaw/
 ```toml
 [project]
 name = "officeclaw"
-version = "1.0.2"
+dynamic = ["version"]        # Read from officeclaw.__version__ by hatchling
 requires-python = ">=3.10"
 
 [project.scripts]

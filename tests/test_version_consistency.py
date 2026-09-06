@@ -86,13 +86,51 @@ class TestPythonFloor:
 
 
 class TestSkillInstallGuidance:
-    def test_minimum_version_is_not_ahead_of_the_package(self):
-        """SKILL.md must not tell agents to install a version that doesn't exist."""
-        match = re.search(r"officeclaw>=(\d+\.\d+\.\d+)", SKILL)
-        assert match, "SKILL.md should pin a minimum officeclaw version"
-        required = tuple(int(p) for p in match.group(1).split("."))
-        current = tuple(int(p) for p in officeclaw.__version__.split("."))
-        assert required <= current
+    def test_minimum_version_equals_the_package_version(self):
+        """SKILL.md documents the version it ships with, so it must require it.
+
+        Pinning lower is how 1.1.1 nearly shipped telling agents ">=1.1.0" while
+        documenting commands only 1.1.1 has; pinning higher would ask for a
+        version that does not exist yet.
+        """
+        pins = set(re.findall(r"officeclaw>=(\d+\.\d+\.\d+)", SKILL))
+        assert pins, "SKILL.md should pin a minimum officeclaw version"
+        assert pins == {officeclaw.__version__}
+
+    def test_verification_example_names_the_current_version(self):
+        assert f"expect {officeclaw.__version__} or newer" in SKILL
+
+
+class TestSkillDocumentsEveryCommand:
+    """An undocumented command does not exist as far as an agent is concerned."""
+
+    @staticmethod
+    def cli_commands(path: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
+        """Walk the command tree the way a reader of --help would."""
+        from click.testing import CliRunner
+
+        from officeclaw.cli import main
+
+        output = CliRunner().invoke(main, [*path, "--help"]).output
+        if "Commands:" not in output:
+            return []
+
+        found: list[tuple[str, ...]] = []
+        for line in output.split("Commands:")[1].splitlines():
+            match = re.match(r"\s{2}(\S+)\s{2,}", line)
+            if match:
+                child = (*path, match.group(1))
+                found.append(child)
+                found.extend(TestSkillDocumentsEveryCommand.cli_commands(child))
+        return found
+
+    def test_every_command_appears_in_the_skill_file(self):
+        undocumented = [
+            "officeclaw " + " ".join(command)
+            for command in self.cli_commands()
+            if "officeclaw " + " ".join(command) not in SKILL
+        ]
+        assert not undocumented, f"not documented in SKILL.md: {undocumented}"
 
 
 @pytest.mark.parametrize("path", ["skill", "src", "tests", "docs", "README.md", "CHANGELOG.md"])

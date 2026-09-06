@@ -39,6 +39,12 @@ All notable changes to OfficeClaw are documented here.
   3.9 CI matrix.
 - Documented `mail search --query` — the argument is positional, so the example
   as written failed.
+- `skill/SKILL.md` never documented `mail reply`, `mail forward`, `mail move`,
+  `mail delete`, `tasks delete`, `calendar accept`, `calendar decline` or
+  `calendar list-calendars`; an agent reading it could not know they existed.
+  A test now fails if any CLI command is missing from the skill file.
+- `docs/ARCHITECTURE.md` showed a static `version = "1.0.2"` in its pyproject
+  excerpt, which the project no longer declares.
 
 ### Notes
 

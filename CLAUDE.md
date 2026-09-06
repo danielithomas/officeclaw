@@ -16,7 +16,11 @@ Before tagging any release, confirm every one of these agrees:
 - [ ] `skill/SKILL.md` frontmatter — `metadata.version` **and** the
       `compatibility:` line's Python floor
 - [ ] `skill/SKILL.md` Installation section — the minimum version it tells
-      agents to install, and the feature list justifying it
+      agents to install (it documents the version it ships with, so the pin
+      equals `__version__`), the `expect X or newer` line, and the feature list
+      justifying it
+- [ ] `skill/SKILL.md` command coverage — every CLI command must appear, or an
+      agent will not know it exists
 - [ ] `CHANGELOG.md` — a `## [x.y.z]` heading with today's date
 - [ ] `pyproject.toml` — `requires-python` and the `Programming Language ::
       Python ::` classifiers
@@ -27,7 +31,8 @@ Before tagging any release, confirm every one of these agrees:
       fails the build if not, but check before pushing a tag — tags are
       annoying to retract and PyPI versions cannot be reused)
 
-`tests/test_version_consistency.py` enforces the machine-checkable half of this,
+`tests/test_version_consistency.py` enforces the machine-checkable half of this
+— including that every command in the CLI tree appears in SKILL.md —
 so a drifted manifest fails CI rather than shipping. Run it with
 `uv run pytest tests/test_version_consistency.py -v`.
 

@@ -21,25 +21,26 @@ Connect your OpenClaw agent to personal Microsoft accounts (Outlook.com, Hotmail
 
 ## Installation
 
-**This skill ships with officeclaw 1.1.1 and needs at least 1.1.0.** Earlier versions lack `--list-name`,
-the due-date filters, `mail download-all`, `calendar --recurrence`, `auth refresh`
-and JSON error output, and they enforce the recipient allowlist on `mail send`
-only. Install or upgrade to at least 1.1.0:
+**This skill documents officeclaw 1.1.1.** Earlier versions lack the commands
+below — `--list-name`, the due-date filters, `--repeat`, `tasks steps`,
+`mail download-all`, `calendar --recurrence`, `auth refresh` and JSON error
+output — and they do not check calendar attendees against the recipient
+allowlist. Install or upgrade to at least 1.1.1:
 
 ```bash
-pip install --upgrade "officeclaw>=1.1.0"
+pip install --upgrade "officeclaw>=1.1.1"
 ```
 
 Or with uv:
 
 ```bash
-uv pip install --upgrade "officeclaw>=1.1.0"
+uv pip install --upgrade "officeclaw>=1.1.1"
 ```
 
 Verify the installed version:
 
 ```bash
-officeclaw --version   # expect 1.1.0 or newer
+officeclaw --version   # expect 1.1.1 or newer
 ```
 
 Requires Python 3.10 or newer (3.9 reached end of life in October 2025, and the
@@ -171,6 +172,17 @@ officeclaw mail send --to user@example.com --subject "Report" --body "Attached" 
 officeclaw mail search "from:boss@example.com"   # QUERY is positional
 officeclaw mail archive <message-id>           # Archive a message
 officeclaw mail mark-read <message-id>         # Mark as read
+officeclaw mail move <message-id> --folder Archive
+
+# Replying and forwarding also need OFFICECLAW_ENABLE_SEND=true, and are
+# subject to the recipient allowlist — reply-all is blocked if any address on
+# the thread is unlisted.
+officeclaw mail reply <message-id> --body "Thanks"
+officeclaw mail reply <message-id> --body "Thanks" --reply-all
+officeclaw mail forward <message-id> --to colleague@example.com --comment "FYI"
+
+# Needs OFFICECLAW_ENABLE_DELETE=true
+officeclaw mail delete <message-id>
 officeclaw mail list --json                    # JSON output for parsing
 
 # Attachments — all require OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD=true
@@ -220,6 +232,14 @@ officeclaw calendar create \
 officeclaw calendar get <event-id>
 officeclaw calendar update <event-id> --subject "Updated Meeting"
 officeclaw calendar update <event-id> --attendee alice@example.com   # Replaces the attendee list
+officeclaw calendar list-calendars
+
+# Responding to an invitation
+officeclaw calendar accept <event-id> --comment "See you there"
+officeclaw calendar decline <event-id>
+
+# Needs OFFICECLAW_ENABLE_DELETE=true
+officeclaw calendar delete <event-id>
 officeclaw calendar delete <event-id>
 officeclaw calendar list --start 2026-02-01 --end 2026-02-28 --json
 
@@ -289,6 +309,9 @@ officeclaw tasks steps delete --task-id <task-id> --item-id <item-id>
 officeclaw tasks complete --task-id <task-id>
 officeclaw tasks reopen --task-id <task-id>
 officeclaw tasks get --task-id <task-id> --json
+
+# Needs OFFICECLAW_ENABLE_DELETE=true
+officeclaw tasks delete --task-id <task-id>
 ```
 
 ## Output Format
