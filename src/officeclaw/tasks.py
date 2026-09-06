@@ -375,6 +375,7 @@ class TasksClient:
         importance: str = "normal",
         reminder: str | None = None,
         categories: list[str] | None = None,
+        recurrence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         Create a new task.
@@ -389,6 +390,8 @@ class TasksClient:
             categories: Category labels. They are stored and returned as given;
                 colour comes from the mailbox's master category list, which
                 OfficeClaw does not manage.
+            recurrence: patternedRecurrence dict; build one with
+                :func:`officeclaw.recurrence.build`
 
         Returns:
             Created task object
@@ -420,6 +423,9 @@ class TasksClient:
         if categories:
             task["categories"] = categories
 
+        if recurrence:
+            task["recurrence"] = recurrence
+
         created: dict[str, Any] = self._client.post(f"/me/todo/lists/{list_id}/tasks", task)
         return created
 
@@ -433,6 +439,9 @@ class TasksClient:
         importance: str | None = None,
         reminder: str | None = None,
         categories: list[str] | None = None,
+        recurrence: dict[str, Any] | None = None,
+        clear_reminder: bool = False,
+        clear_recurrence: bool = False,
     ) -> dict[str, Any]:
         """
         Update a task.
@@ -444,8 +453,11 @@ class TasksClient:
             body: New description
             due_date: New due date
             importance: New importance
-            reminder: New reminder datetime (ISO format); "" clears it
+            reminder: New reminder datetime (ISO format); "" also clears it
             categories: Replacement category labels
+            recurrence: New patternedRecurrence dict
+            clear_reminder: Remove the reminder
+            clear_recurrence: Stop the task repeating
 
         Returns:
             Updated task object
@@ -473,7 +485,10 @@ class TasksClient:
         if importance is not None:
             data["importance"] = importance
 
-        if reminder is not None:
+        if clear_reminder:
+            data["reminderDateTime"] = None
+            data["isReminderOn"] = False
+        elif reminder is not None:
             if reminder:
                 data["reminderDateTime"] = {"dateTime": reminder, "timeZone": "UTC"}
                 data["isReminderOn"] = True
@@ -483,6 +498,11 @@ class TasksClient:
 
         if categories is not None:
             data["categories"] = categories
+
+        if clear_recurrence:
+            data["recurrence"] = None
+        elif recurrence:
+            data["recurrence"] = recurrence
 
         updated: dict[str, Any] = self._client.patch(
             f"/me/todo/lists/{list_id}/tasks/{task_id}",
@@ -549,6 +569,66 @@ class TasksClient:
     def delete_task(self, list_id: str, task_id: str) -> None:
         """Delete a task."""
         self._client.delete(f"/me/todo/lists/{list_id}/tasks/{task_id}")
+
+    # ------------------------------------------------------------------
+    # Checklist items (the "steps" shown under a task in Microsoft To Do)
+    # ------------------------------------------------------------------
+
+    def list_checklist_items(self, list_id: str, task_id: str) -> list[dict[str, Any]]:
+        """
+        List a task's checklist items.
+
+        Args:
+            list_id: Task list ID
+            task_id: Task ID
+
+        Returns:
+            Checklist items, each with id, displayName and isChecked
+        """
+        return self._client.get_all(f"/me/todo/lists/{list_id}/tasks/{task_id}/checklistItems")
+
+    def add_checklist_item(self, list_id: str, task_id: str, display_name: str) -> dict[str, Any]:
+        """
+        Add a checklist item to a task.
+
+        Args:
+            list_id: Task list ID
+            task_id: Task ID
+            display_name: Text of the step
+
+        Returns:
+            Created checklist item
+        """
+        created: dict[str, Any] = self._client.post(
+            f"/me/todo/lists/{list_id}/tasks/{task_id}/checklistItems",
+            {"displayName": display_name},
+        )
+        return created
+
+    def check_checklist_item(
+        self, list_id: str, task_id: str, item_id: str, is_checked: bool = True
+    ) -> dict[str, Any]:
+        """
+        Tick or untick a checklist item.
+
+        Args:
+            list_id: Task list ID
+            task_id: Task ID
+            item_id: Checklist item ID
+            is_checked: True to complete, False to reopen
+
+        Returns:
+            Updated checklist item
+        """
+        updated: dict[str, Any] = self._client.patch(
+            f"/me/todo/lists/{list_id}/tasks/{task_id}/checklistItems/{item_id}",
+            {"isChecked": is_checked},
+        )
+        return updated
+
+    def delete_checklist_item(self, list_id: str, task_id: str, item_id: str) -> None:
+        """Delete a checklist item."""
+        self._client.delete(f"/me/todo/lists/{list_id}/tasks/{task_id}/checklistItems/{item_id}")
 
     def close(self) -> None:
         """Close the client."""

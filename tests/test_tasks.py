@@ -317,3 +317,103 @@ class TestTaskMetadata:
         payload = mock_client.patch.call_args[0][1]
         assert payload["reminderDateTime"] is None
         assert payload["isReminderOn"] is False
+
+
+class TestTaskRecurrence:
+    """--repeat on tasks, sharing the calendar recurrence parser (PR #9)."""
+
+    @patch("officeclaw.tasks.GraphClient")
+    def test_create_sends_a_recurrence(self, mock_client_class):
+        from officeclaw import recurrence
+        from officeclaw.tasks import TasksClient
+
+        mock_client = MagicMock()
+        mock_client.post.return_value = {}
+        mock_client_class.return_value = mock_client
+
+        TasksClient().create_task(
+            "l1", "Water plants", recurrence=recurrence.build("weekly:MON,THU", "2026-09-08")
+        )
+
+        payload = mock_client.post.call_args[0][1]
+        assert payload["recurrence"]["pattern"]["daysOfWeek"] == ["monday", "thursday"]
+
+    @patch("officeclaw.tasks.GraphClient")
+    def test_update_can_stop_a_task_repeating(self, mock_client_class):
+        from officeclaw.tasks import TasksClient
+
+        mock_client = MagicMock()
+        mock_client.patch.return_value = {}
+        mock_client_class.return_value = mock_client
+
+        TasksClient().update_task("l1", "t1", clear_recurrence=True)
+
+        assert mock_client.patch.call_args[0][1]["recurrence"] is None
+
+    @patch("officeclaw.tasks.GraphClient")
+    def test_update_can_clear_a_reminder(self, mock_client_class):
+        from officeclaw.tasks import TasksClient
+
+        mock_client = MagicMock()
+        mock_client.patch.return_value = {}
+        mock_client_class.return_value = mock_client
+
+        TasksClient().update_task("l1", "t1", clear_reminder=True)
+
+        payload = mock_client.patch.call_args[0][1]
+        assert payload["reminderDateTime"] is None and payload["isReminderOn"] is False
+
+
+class TestChecklistItems:
+    """Steps within a task (PR #9)."""
+
+    @patch("officeclaw.tasks.GraphClient")
+    def test_list(self, mock_client_class):
+        from officeclaw.tasks import TasksClient
+
+        mock_client = MagicMock()
+        mock_client.get_all.return_value = [{"id": "i1", "displayName": "Step", "isChecked": False}]
+        mock_client_class.return_value = mock_client
+
+        items = TasksClient().list_checklist_items("l1", "t1")
+
+        assert items[0]["displayName"] == "Step"
+        assert mock_client.get_all.call_args[0][0].endswith("/tasks/t1/checklistItems")
+
+    @patch("officeclaw.tasks.GraphClient")
+    def test_add(self, mock_client_class):
+        from officeclaw.tasks import TasksClient
+
+        mock_client = MagicMock()
+        mock_client.post.return_value = {"id": "i1"}
+        mock_client_class.return_value = mock_client
+
+        TasksClient().add_checklist_item("l1", "t1", "Buy pots")
+
+        assert mock_client.post.call_args[0][1] == {"displayName": "Buy pots"}
+
+    @patch("officeclaw.tasks.GraphClient")
+    def test_check_and_uncheck(self, mock_client_class):
+        from officeclaw.tasks import TasksClient
+
+        mock_client = MagicMock()
+        mock_client.patch.return_value = {}
+        mock_client_class.return_value = mock_client
+
+        client = TasksClient()
+        client.check_checklist_item("l1", "t1", "i1")
+        assert mock_client.patch.call_args[0][1] == {"isChecked": True}
+
+        client.check_checklist_item("l1", "t1", "i1", is_checked=False)
+        assert mock_client.patch.call_args[0][1] == {"isChecked": False}
+
+    @patch("officeclaw.tasks.GraphClient")
+    def test_delete(self, mock_client_class):
+        from officeclaw.tasks import TasksClient
+
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+
+        TasksClient().delete_checklist_item("l1", "t1", "i1")
+
+        assert mock_client.delete.call_args[0][0].endswith("/checklistItems/i1")

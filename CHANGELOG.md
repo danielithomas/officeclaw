@@ -4,7 +4,31 @@ All notable changes to OfficeClaw are documented here.
 
 ## [1.1.1] — 2026-09-06
 
+### Security
+
+- **Calendar attendees are now checked against the recipient allowlist.** 1.1.0
+  added `calendar create --attendee` without it, and Graph emails an invitation
+  to every attendee — so an agent blocked from mailing an address could invite
+  it instead. The check now lives in `CalendarClient`, covering the Python API
+  as well as the CLI, and blocked invitations are logged like blocked sends
+  (`action=calendar-invite`). Raised in PR #8 by danbryant201.
+
+### Added
+
+- `calendar update --attendee` — replace an event's attendees, subject to the
+  same allowlist (PR #8, danbryant201).
+- **Repeating tasks:** `tasks create --repeat` and `tasks update --repeat` /
+  `--no-repeat`, accepting `daily`, `daily:3`, `weekly`, `weekly:MON,WED`,
+  `fortnightly`, `weekdays`, `monthly`, `monthly:15` and `yearly` (PR #9,
+  danbryant201). The shorthand now backs `calendar create --recurrence` too, so
+  both commands share one syntax and one parser (`officeclaw.recurrence`).
+- **Task steps:** `tasks steps list|add|complete|delete` for checklist items
+  within a task (PR #9, danbryant201).
+- `tasks update --no-reminder` as a clearer way to remove a reminder than the
+  previous `--reminder ""` (PR #9, danbryant201).
+
 ### Fixed
+
 - **OpenClaw skill manifest**, which the 1.1.0 sdist shipped with stale
   metadata: it advertised `version: "1.0.4"` and `Requires Python 3.9+`. The
   Python claim was the consequential one — 1.1.0 requires 3.10, so a host
@@ -13,8 +37,17 @@ All notable changes to OfficeClaw are documented here.
   need it.
 - `docs/ARCHITECTURE.md` still showed `requires-python = ">=3.9"` and a Python
   3.9 CI matrix.
+- Documented `mail search --query` — the argument is positional, so the example
+  as written failed.
 
-No code changes: the package itself is identical to 1.1.0.
+### Notes
+
+- `tests/test_version_consistency.py` now fails the build if the skill manifest,
+  README, classifiers, CI matrix or ARCHITECTURE drift from `__version__` and
+  `requires-python`; `CLAUDE.md` carries the matching release checklist.
+- PR #9's `--add-to-my-day` is **not** included: Microsoft Graph has no My Day
+  property, and the flag set `startDateTime`, which is a different thing. The
+  underlying capability may return later under an honest name.
 
 ## [1.1.0] — 2026-09-05
 

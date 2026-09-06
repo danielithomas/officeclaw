@@ -918,6 +918,13 @@ def calendar_create(
     recurrence_count: int | None,
 ) -> None:
     """Create a calendar event."""
+    if attendee and policy.get_allowed_recipients() is None:
+        error_console.print(
+            "[yellow]⚠️  No recipient allowlist configured. Invitations can be sent to any "
+            "address.[/yellow]\n"
+            "[yellow]   Set OFFICECLAW_ALLOWED_RECIPIENTS in your .env to restrict them.[/yellow]"
+        )
+
     try:
         from officeclaw.calendar import CalendarClient
 
@@ -964,6 +971,7 @@ def calendar_create(
 @click.option("--end", default=None, help="New end datetime")
 @click.option("--location", default=None, help="New location")
 @click.option("--body", default=None, help="New description")
+@click.option("--attendee", multiple=True, help="Replacement attendee email (repeatable)")
 @json_option
 @click.pass_context
 def calendar_update(
@@ -974,8 +982,13 @@ def calendar_update(
     end: str | None,
     location: str | None,
     body: str | None,
+    attendee: tuple[str, ...],
 ) -> None:
-    """Update a calendar event."""
+    """Update a calendar event.
+
+    Changing attendees sends invitations, so --attendee is checked against
+    OFFICECLAW_ALLOWED_RECIPIENTS exactly as `mail send` is.
+    """
     try:
         from officeclaw.calendar import CalendarClient
 
@@ -987,6 +1000,7 @@ def calendar_update(
                 end=end,
                 location=location,
                 body=body,
+                attendees=list(attendee) or None,
             )
 
         if ctx.obj.get("json"):
@@ -1237,6 +1251,11 @@ def tasks_list(
 )
 @click.option("--reminder", default=None, help="Reminder datetime (YYYY-MM-DDTHH:MM:SS)")
 @click.option("--category", multiple=True, help="Category label (repeatable or comma-separated)")
+@click.option(
+    "--repeat",
+    default=None,
+    help="Repeat: daily, daily:3, weekly, weekly:MON,WED, fortnightly, weekdays, monthly, monthly:15, yearly",
+)
 @json_option
 @click.pass_context
 def tasks_create(
@@ -1249,10 +1268,21 @@ def tasks_create(
     importance: str,
     reminder: str | None,
     category: tuple[str, ...],
+    repeat: str | None,
 ) -> None:
-    """Create a new task."""
+    """Create a new task.
+
+    --repeat accepts daily, daily:3, weekly, weekly:MON,WED, fortnightly,
+    weekdays, monthly, monthly:15 and yearly. The series starts on --due-date
+    when given, otherwise today.
+    """
     try:
+        from datetime import date
+
+        from officeclaw import recurrence
         from officeclaw.tasks import TasksClient
+
+        pattern = recurrence.build(repeat, due_date or date.today().isoformat()) if repeat else None
 
         with TasksClient() as tc:
             resolved = tc.resolve_list_id(list_id=list_id, list_name=list_name)
@@ -1264,6 +1294,7 @@ def tasks_create(
                 importance=importance,
                 reminder=reminder,
                 categories=split_categories(category),
+                recurrence=pattern,
             )
 
         if ctx.obj.get("json"):
@@ -1372,8 +1403,11 @@ def tasks_get(ctx: click.Context, list_id: str | None, list_name: str | None, ta
 @click.option(
     "--importance", type=click.Choice(["low", "normal", "high"]), default=None, help="Importance"
 )
-@click.option("--reminder", default=None, help='New reminder datetime; "" clears it')
+@click.option("--reminder", default=None, help="New reminder datetime")
+@click.option("--no-reminder", is_flag=True, help="Clear the reminder")
 @click.option("--category", multiple=True, help="Replacement category labels")
+@click.option("--repeat", default=None, help="Repeat pattern (see `tasks create --help`)")
+@click.option("--no-repeat", is_flag=True, help="Stop the task repeating")
 @json_option
 @click.pass_context
 def tasks_update(
@@ -1386,11 +1420,24 @@ def tasks_update(
     due_date: str | None,
     importance: str | None,
     reminder: str | None,
+    no_reminder: bool,
     category: tuple[str, ...],
+    repeat: str | None,
+    no_repeat: bool,
 ) -> None:
     """Update a task."""
     try:
+        from datetime import date
+
+        from officeclaw import recurrence
         from officeclaw.tasks import TasksClient
+
+        if repeat and no_repeat:
+            fail("Give either --repeat or --no-repeat, not both.", code="ConflictingOptions")
+        if reminder and no_reminder:
+            fail("Give either --reminder or --no-reminder, not both.", code="ConflictingOptions")
+
+        pattern = recurrence.build(repeat, due_date or date.today().isoformat()) if repeat else None
 
         with TasksClient() as tc:
             resolved = tc.resolve_list_id(list_id=list_id, list_name=list_name)
@@ -1403,12 +1450,145 @@ def tasks_update(
                 importance=importance,
                 reminder=reminder,
                 categories=split_categories(category),
+                recurrence=pattern,
+                clear_reminder=no_reminder,
+                clear_recurrence=no_repeat,
             )
 
         if ctx.obj.get("json"):
             output_json(result)
         else:
             console.print(f"[green]✓[/green] Task updated: {result.get('title', task_id)}")
+    except Exception as e:
+        handle_error(e)
+
+
+@tasks.group("steps")
+def tasks_steps() -> None:
+    """Checklist items within a task."""
+    pass
+
+
+@tasks_steps.command("list")
+@list_target_options
+@click.option("--task-id", required=True, help="Task ID")
+@json_option
+@click.pass_context
+def tasks_steps_list(
+    ctx: click.Context, list_id: str | None, list_name: str | None, task_id: str
+) -> None:
+    """List a task's checklist items."""
+    try:
+        from officeclaw.tasks import TasksClient
+
+        with TasksClient() as tc:
+            resolved = tc.resolve_list_id(list_id=list_id, list_name=list_name)
+            items = tc.list_checklist_items(resolved, task_id)
+
+        if ctx.obj.get("json"):
+            output_json(items)
+            return
+
+        if not items:
+            console.print("[yellow]No steps.[/yellow]")
+            return
+
+        table = Table(title="Steps")
+        table.add_column("Done")
+        table.add_column("Step", max_width=50)
+        table.add_column("ID", style="dim", max_width=20)
+        for item in items:
+            table.add_row(
+                "✓" if item.get("isChecked") else "○",
+                item.get("displayName", ""),
+                (item.get("id", "")[:20] + "..."),
+            )
+        console.print(table)
+    except Exception as e:
+        handle_error(e)
+
+
+@tasks_steps.command("add")
+@list_target_options
+@click.option("--task-id", required=True, help="Task ID")
+@click.argument("text")
+@json_option
+@click.pass_context
+def tasks_steps_add(
+    ctx: click.Context, list_id: str | None, list_name: str | None, task_id: str, text: str
+) -> None:
+    """Add a checklist item to a task."""
+    try:
+        from officeclaw.tasks import TasksClient
+
+        with TasksClient() as tc:
+            resolved = tc.resolve_list_id(list_id=list_id, list_name=list_name)
+            item = tc.add_checklist_item(resolved, task_id, text)
+
+        if ctx.obj.get("json"):
+            output_json(item)
+        else:
+            console.print(f"[green]✓[/green] Step added: {text}")
+    except Exception as e:
+        handle_error(e)
+
+
+@tasks_steps.command("complete")
+@list_target_options
+@click.option("--task-id", required=True, help="Task ID")
+@click.option("--item-id", required=True, help="Checklist item ID")
+@click.option("--undo", is_flag=True, help="Reopen the step instead")
+@json_option
+@click.pass_context
+def tasks_steps_complete(
+    ctx: click.Context,
+    list_id: str | None,
+    list_name: str | None,
+    task_id: str,
+    item_id: str,
+    undo: bool,
+) -> None:
+    """Tick a checklist item (or untick it with --undo)."""
+    try:
+        from officeclaw.tasks import TasksClient
+
+        with TasksClient() as tc:
+            resolved = tc.resolve_list_id(list_id=list_id, list_name=list_name)
+            item = tc.check_checklist_item(resolved, task_id, item_id, is_checked=not undo)
+
+        if ctx.obj.get("json"):
+            output_json(item)
+        else:
+            console.print(f"[green]✓[/green] Step {'reopened' if undo else 'completed'}.")
+    except Exception as e:
+        handle_error(e)
+
+
+@tasks_steps.command("delete")
+@list_target_options
+@click.option("--task-id", required=True, help="Task ID")
+@click.option("--item-id", required=True, help="Checklist item ID")
+@json_option
+@click.pass_context
+def tasks_steps_delete(
+    ctx: click.Context, list_id: str | None, list_name: str | None, task_id: str, item_id: str
+) -> None:
+    """Delete a checklist item.
+
+    Requires OFFICECLAW_ENABLE_DELETE=true in .env (disabled by default for safety).
+    """
+    require_capability("OFFICECLAW_ENABLE_DELETE", "Deleting task steps")
+    try:
+        from officeclaw.tasks import TasksClient
+
+        with TasksClient() as tc:
+            resolved = tc.resolve_list_id(list_id=list_id, list_name=list_name)
+            tc.delete_checklist_item(resolved, task_id, item_id)
+
+        if ctx.obj.get("json"):
+            output_json({"deleted": True, "item_id": item_id})
+        else:
+            console.print("[green]✓[/green] Step deleted.")
     except Exception as e:
         handle_error(e)
 

@@ -265,7 +265,7 @@ OFFICECLAW_ALLOWED_RECIPIENTS=alice@example.com,bob@example.com,team@company.com
 - If `OFFICECLAW_ALLOWED_RECIPIENTS` is **set** — only listed addresses can receive email. Any attempt to send to an unlisted address is blocked, logged to `~/.openclaw/workspace/automation/logs/email-blocked.log`, and an alert file is written for monitoring.
 - If `OFFICECLAW_ALLOWED_RECIPIENTS` is **not set** — a warning is displayed on each send reminding you to configure the allowlist. All addresses are permitted.
 - The allowlist is checked **after** the `OFFICECLAW_ENABLE_SEND` gate — users who haven't enabled sending are unaffected.
-- Every outbound path is covered: `mail send` (including cc and bcc), `mail forward`, `mail reply`/`--reply-all`, and the Python API. Reply-all resolves the thread's real recipients before sending, so a single outside address on the thread blocks the reply.
+- Every outbound path is covered: `mail send` (including cc and bcc), `mail forward`, `mail reply`/`--reply-all`, **calendar attendees** on `calendar create`/`update` — a meeting invitation is email, so an agent blocked from mailing someone must not be able to invite them instead — and the Python API. Reply-all resolves the thread's real recipients before sending, so a single outside address on the thread blocks the reply.
 
 This is especially important for AI agent workflows where an LLM controls email sending — the allowlist provides a hard, code-level boundary that cannot be bypassed by prompt injection or misconfiguration.
 

@@ -219,6 +219,7 @@ officeclaw calendar create \
   --location "Conference Room"
 officeclaw calendar get <event-id>
 officeclaw calendar update <event-id> --subject "Updated Meeting"
+officeclaw calendar update <event-id> --attendee alice@example.com   # Replaces the attendee list
 officeclaw calendar delete <event-id>
 officeclaw calendar list --start 2026-02-01 --end 2026-02-28 --json
 
@@ -231,8 +232,13 @@ officeclaw calendar create \
   --online-meeting \
   --recurrence weekly --recurrence-count 12
 
-# --recurrence: daily | weekly | fortnightly | weekdays | monthly | yearly
-# End the series with --recurrence-until YYYY-MM-DD or --recurrence-count N (not both)
+# --recurrence and tasks --repeat share one syntax:
+#   daily            daily:3          every day / every third day
+#   weekly           weekly:MON,WED   the start weekday / named days
+#   fortnightly      weekdays         every second week / Mon-Fri
+#   monthly          monthly:15       the start day of month / the 15th
+#   yearly                            annually on the start date
+# End a calendar series with --recurrence-until YYYY-MM-DD or --recurrence-count N (not both)
 ```
 
 ### Task Commands
@@ -267,7 +273,19 @@ officeclaw tasks create \
   --category "finance,admin"
 
 officeclaw tasks update --task-id <task-id> --reminder "2026-09-16T08:00:00"
-officeclaw tasks update --task-id <task-id> --reminder ""   # Clear the reminder
+officeclaw tasks update --task-id <task-id> --no-reminder    # Clear the reminder
+
+# Repeating tasks
+officeclaw tasks create --title "Water plants" --repeat "weekly:MON,THU"
+officeclaw tasks create --title "Rent" --due-date 2026-10-01 --repeat monthly
+officeclaw tasks update --task-id <task-id> --no-repeat      # Stop repeating
+
+# Steps (checklist items within a task)
+officeclaw tasks steps list --task-id <task-id>
+officeclaw tasks steps add --task-id <task-id> "Buy pots"
+officeclaw tasks steps complete --task-id <task-id> --item-id <item-id>
+officeclaw tasks steps complete --task-id <task-id> --item-id <item-id> --undo
+officeclaw tasks steps delete --task-id <task-id> --item-id <item-id>
 officeclaw tasks complete --task-id <task-id>
 officeclaw tasks reopen --task-id <task-id>
 officeclaw tasks get --task-id <task-id> --json
@@ -359,7 +377,7 @@ When using this skill:
 ## Security & Privacy
 
 - **Write operations disabled by default**: Send, reply, forward, and delete are all blocked unless explicitly enabled via `OFFICECLAW_ENABLE_SEND` and `OFFICECLAW_ENABLE_DELETE` environment variables. This prevents accidental or unauthorised write actions.
-- **Recipient allowlist (v1.0.4+, extended in v1.1.0)**: When `OFFICECLAW_ALLOWED_RECIPIENTS` is set, outbound email is restricted to listed addresses only — on **every** path: send (including cc and bcc), reply, reply-all, forward, and the Python API. Blocked attempts are logged to `email-blocked.log` and an `email-alert.json` alert file is written for monitoring. If not set, a runtime warning is displayed on each send. **Strongly recommended for any AI agent deployment.**
+- **Recipient allowlist (v1.0.4+, extended in v1.1.0 and v1.1.1)**: When `OFFICECLAW_ALLOWED_RECIPIENTS` is set, outbound email is restricted to listed addresses only — on **every** path: send (including cc and bcc), reply, reply-all, forward, **calendar attendees** (an invitation is email), and the Python API. Blocked attempts are logged to `email-blocked.log` and an `email-alert.json` alert file is written for monitoring. If not set, a runtime warning is displayed on each send. **Strongly recommended for any AI agent deployment.**
 - **Download location (v1.1.0+)**: with no `--dest`, files go to `OFFICECLAW_DOWNLOADS_DIR`, else `officeclaw_downloads/` inside the first allowed attachment directory, else inside the platform's Downloads folder. Saved names are made legal on Windows, macOS and Linux alike.
 - **Attachment directories (v1.1.0+)**: `OFFICECLAW_ALLOWED_ATTACHMENT_DIRS` governs both directions — where files may be attached *from* and where downloads may be written *to*. Downloaded filenames are reduced to a bare name, so a message cannot steer a write with a name like `../../.ssh/authorized_keys`, and existing files are never overwritten.
 - **`.env` cannot weaken injected settings (v1.1.0+)**: where a supervising process sets a security variable, `.env` composes with it to the stricter value — allowlists intersect, capability gates need both sources, restrictions apply if either asks. An entry that is dropped is reported with a warning, so nothing is ignored silently.
