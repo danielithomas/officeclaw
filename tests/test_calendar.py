@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 class TestCalendarClient:
     """Test CalendarClient operations."""
@@ -214,3 +216,114 @@ class TestCalendarClient:
         # Strips Z suffix
         result = client._normalize_datetime("2026-02-15T10:30:00Z")
         assert result == "2026-02-15T10:30:00"
+
+
+class TestListEventsTimezone:
+    """The timezone argument is sent as a Prefer header."""
+
+    @patch("officeclaw.calendar.GraphClient")
+    def test_timezone_sets_prefer_header(self, mock_client_class):
+        from officeclaw.calendar import CalendarClient
+
+        mock_client = MagicMock()
+        mock_client.get_all.return_value = []
+        mock_client_class.return_value = mock_client
+
+        CalendarClient().list_events("2026-02-01", "2026-02-28", timezone="Pacific Standard Time")
+
+        headers = mock_client.get_all.call_args[1]["headers"]
+        assert headers == {"Prefer": 'outlook.timezone="Pacific Standard Time"'}
+
+    @patch("officeclaw.calendar.GraphClient")
+    def test_no_header_without_timezone(self, mock_client_class):
+        from officeclaw.calendar import CalendarClient
+
+        mock_client = MagicMock()
+        mock_client.get_all.return_value = []
+        mock_client_class.return_value = mock_client
+
+        CalendarClient().list_events("2026-02-01", "2026-02-28")
+
+        assert mock_client.get_all.call_args[1]["headers"] is None
+
+
+class TestRecurrence:
+    """Simple recurrence names become Graph patternedRecurrence objects."""
+
+    def test_weekly_uses_the_start_weekday(self):
+        from officeclaw.calendar import CalendarClient
+
+        # 2026-09-08 is a Tuesday.
+        recurrence = CalendarClient.build_recurrence("weekly", "2026-09-08T10:00:00")
+
+        assert recurrence["pattern"]["type"] == "weekly"
+        assert recurrence["pattern"]["daysOfWeek"] == ["tuesday"]
+        assert recurrence["range"]["type"] == "noEnd"
+
+    def test_weekdays_covers_monday_to_friday(self):
+        from officeclaw.calendar import CalendarClient
+
+        pattern = CalendarClient.build_recurrence("weekdays", "2026-09-08")["pattern"]
+
+        assert pattern["daysOfWeek"] == [
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+        ]
+
+    def test_monthly_pins_the_day_of_month(self):
+        from officeclaw.calendar import CalendarClient
+
+        pattern = CalendarClient.build_recurrence("monthly", "2026-09-08")["pattern"]
+
+        assert pattern["type"] == "absoluteMonthly"
+        assert pattern["dayOfMonth"] == 8
+
+    def test_until_produces_an_end_date_range(self):
+        from officeclaw.calendar import CalendarClient
+
+        rng = CalendarClient.build_recurrence("daily", "2026-09-08", until="2026-12-01")["range"]
+
+        assert rng["type"] == "endDate"
+        assert rng["endDate"] == "2026-12-01"
+
+    def test_count_produces_a_numbered_range(self):
+        from officeclaw.calendar import CalendarClient
+
+        rng = CalendarClient.build_recurrence("daily", "2026-09-08", count=6)["range"]
+
+        assert rng["type"] == "numbered"
+        assert rng["numberOfOccurrences"] == 6
+
+    def test_until_and_count_together_are_refused(self):
+        from officeclaw.calendar import CalendarClient
+
+        with pytest.raises(ValueError, match="not both"):
+            CalendarClient.build_recurrence("daily", "2026-09-08", until="2026-12-01", count=6)
+
+    def test_unknown_pattern_is_refused(self):
+        from officeclaw.calendar import CalendarClient
+
+        with pytest.raises(ValueError, match="Unknown recurrence"):
+            CalendarClient.build_recurrence("hourly", "2026-09-08")
+
+    @patch("officeclaw.calendar.GraphClient")
+    def test_recurrence_reaches_the_event_payload(self, mock_client_class):
+        from officeclaw.calendar import CalendarClient
+
+        mock_client = MagicMock()
+        mock_client.post.return_value = {}
+        mock_client_class.return_value = mock_client
+
+        client = CalendarClient()
+        client.create_event(
+            "Weekly sync",
+            "2026-09-08T10:00:00",
+            "2026-09-08T11:00:00",
+            recurrence=CalendarClient.build_recurrence("weekly", "2026-09-08T10:00:00"),
+        )
+
+        payload = mock_client.post.call_args[0][1]
+        assert payload["recurrence"]["pattern"]["type"] == "weekly"

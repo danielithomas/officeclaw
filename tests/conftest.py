@@ -9,6 +9,7 @@ This module provides:
 
 from __future__ import annotations
 
+import os
 from collections.abc import Generator
 from datetime import datetime, timezone
 from typing import Any
@@ -16,6 +17,68 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import responses
+
+
+@pytest.fixture(autouse=True)
+def _restore_environment():
+    """Undo any environment change a test leaves behind.
+
+    monkeypatch only reverts what monkeypatch itself set; code under test that
+    writes to os.environ directly — config.apply_to_environment() does — would
+    otherwise leak into every test that runs after it.
+    """
+    original = os.environ.copy()
+    yield
+    os.environ.clear()
+    os.environ.update(original)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_config(tmp_path, monkeypatch):
+    """Point the config file at a path that does not exist.
+
+    Without this, a developer's own ~/.config/officeclaw/config.toml would
+    change what the tests see.
+    """
+    monkeypatch.setenv("OFFICECLAW_CONFIG", str(tmp_path / "absent.toml"))
+
+
+@pytest.fixture(autouse=True)
+def _isolated_home(request, tmp_path, monkeypatch):
+    """Keep every test's writes inside tmp_path, never the real home directory.
+
+    A test that forgets to patch one of these paths would otherwise write to
+    the developer's own token cache, list cache or block log — and a stale
+    entry left behind there changes what the installed CLI does afterwards.
+
+    Integration tests are the exception: they need the real token cache to
+    authenticate. They keep their logs and list cache isolated, but read and
+    write credentials where the CLI does. Stating that here beats relying on
+    fixture ordering to leave the token cache alone.
+    """
+    from officeclaw import auth, policy, tasks
+
+    home = tmp_path / "home"
+    officeclaw_dir = home / ".officeclaw"
+    logs = home / "logs"
+    officeclaw_dir.mkdir(parents=True)
+
+    if request.node.get_closest_marker("integration") is None:
+        # HOME first: paths derived from Path.home() at runtime — the legacy
+        # token file among them — would otherwise still point at the real home,
+        # and clearing tokens in a test would log the developer out for real.
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))  # Windows equivalent
+        monkeypatch.setattr(auth, "CACHE_DIR", officeclaw_dir)
+        monkeypatch.setattr(auth, "CACHE_FILE", officeclaw_dir / "token_cache.json")
+        monkeypatch.setattr(tasks, "CACHE_DIR", officeclaw_dir)
+
+    # tasks imports LIST_CACHE_FILE by name, so it needs patching separately.
+    monkeypatch.setattr(tasks, "LIST_CACHE_FILE", officeclaw_dir / "list_cache.json")
+    monkeypatch.setattr(policy, "LOG_DIR", logs)
+    monkeypatch.setattr(policy, "BLOCK_LOG", logs / "email-blocked.log")
+    monkeypatch.setattr(policy, "ALERT_FILE", logs / "email-alert.json")
+
 
 # ============================================
 # SAMPLE DATA
@@ -55,6 +118,33 @@ SAMPLE_EVENT = {
     "organizer": {"emailAddress": {"name": "Test User", "address": "test@outlook.com"}},
     "isAllDay": False,
     "isCancelled": False,
+}
+
+SAMPLE_ATTACHMENT = {
+    "@odata.type": "#microsoft.graph.fileAttachment",
+    "id": "AAMkAGUz...",
+    "lastModifiedDateTime": "2026-04-23T23:31:17Z",
+    "name": "meeting_notes.txt",
+    "contentType": "text/plain",
+    "size": 15243,
+    "isInline": False,
+    "contentBytes": "SGVsbG8sIHRoaXMgaXMgdGVzdCBjb250ZW50Lg==",
+}
+
+SAMPLE_ATTACHMENT_PDF = {
+    "@odata.type": "#microsoft.graph.fileAttachment",
+    "id": "AAMkAGUy...",
+    "lastModifiedDateTime": "2026-04-23T23:31:17Z",
+    "name": "report.pdf",
+    "contentType": "application/pdf",
+    "size": 10485760,
+    "isInline": False,
+    "contentBytes": "JVBERi0xLjQKJcOkw7zDtsO...",
+}
+
+SAMPLE_MESSAGE_WITH_ATTACHMENTS = {
+    **SAMPLE_MESSAGE,
+    "hasAttachments": True,
 }
 
 SAMPLE_TASK_LIST = {
@@ -166,6 +256,31 @@ def sample_messages() -> list[dict[str, Any]]:
 def sample_event() -> dict[str, Any]:
     """Return a sample calendar event."""
     return SAMPLE_EVENT.copy()
+
+
+@pytest.fixture
+def sample_attachment() -> dict[str, Any]:
+    """Return a sample file attachment."""
+    return SAMPLE_ATTACHMENT.copy()
+
+
+@pytest.fixture
+def sample_attachments() -> list[dict[str, Any]]:
+    """Return a list of sample attachments."""
+    return [
+        SAMPLE_ATTACHMENT.copy(),
+        SAMPLE_ATTACHMENT_PDF.copy(),
+    ]
+
+
+@pytest.fixture
+def sample_message_with_attachments() -> dict[str, Any]:
+    """Return a sample message with attachments."""
+    return {
+        **SAMPLE_MESSAGE,
+        "id": "msg-with-attachments",
+        "hasAttachments": True,
+    }
 
 
 @pytest.fixture

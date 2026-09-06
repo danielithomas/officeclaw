@@ -19,13 +19,15 @@ Example usage:
 
 from __future__ import annotations
 
-__version__ = "1.0.2"
+from typing import Any
+
+__version__ = "1.1.0"
 __author__ = "Daniel Thomas"
 __email__ = "dan@theenquiringmind.com"
 
 
 # Lazy imports to avoid loading everything on import
-def __getattr__(name: str):
+def __getattr__(name: str) -> Any:
     """Lazy import of client classes."""
     if name == "MailClient":
         from officeclaw.mail import MailClient
@@ -47,6 +49,18 @@ def __getattr__(name: str):
         from officeclaw.client import GraphClient
 
         return GraphClient
+    elif name == "AttachmentSecurityError":
+        from officeclaw.exceptions import AttachmentSecurityError
+
+        return AttachmentSecurityError
+    elif name == "AttachmentSizeError":
+        from officeclaw.exceptions import AttachmentSizeError
+
+        return AttachmentSizeError
+    elif name == "AttachmentTypeError":
+        from officeclaw.exceptions import AttachmentTypeError
+
+        return AttachmentTypeError
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -55,7 +69,9 @@ __all__ = [
     "MailClient",
     "CalendarClient",
     "TasksClient",
-    "TasksClient",
     "TokenManager",
     "GraphClient",
+    "AttachmentSecurityError",
+    "AttachmentSizeError",
+    "AttachmentTypeError",
 ]

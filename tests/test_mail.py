@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 class TestMailClient:
     """Test MailClient operations."""
@@ -167,3 +169,229 @@ class TestMailClient:
             "/me/messages/msg-123/move",
             {"destinationId": "archive"},
         )
+
+    @patch("officeclaw.mail.GraphClient")
+    def test_list_attachments(self, mock_client_class, sample_attachments):
+        """Test listing attachments for a message."""
+        from officeclaw.mail import MailClient
+
+        mock_client = MagicMock()
+        mock_client.get_all.return_value = sample_attachments
+        mock_client_class.return_value = mock_client
+
+        client = MailClient()
+        attachments = client.list_attachments("msg-123")
+
+        assert len(attachments) == 2
+        # $select keeps contentBytes out of a listing: without it, listing a
+        # message's attachments downloads all of them.
+        mock_client.get_all.assert_called_with(
+            "/me/messages/msg-123/attachments",
+            params={"$select": "id,name,contentType,size,isInline"},
+        )
+
+    @patch("officeclaw.mail.GraphClient")
+    def test_download_attachment_success(self, mock_client_class, sample_attachments):
+        """Test successful attachment download."""
+        import os
+        import tempfile
+
+        from officeclaw.mail import MailClient
+
+        os.environ["OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD"] = "true"
+        os.environ["OFFICECLAW_SAFE_SENDERS_ONLY"] = "true"
+        os.environ["OFFICECLAW_SAFE_SENDERS_LIST"] = "sender@example.com"
+
+        mock_client = MagicMock()
+
+        def _mock_get(endpoint):
+            if "attachments/AAMkAGUz" in endpoint:
+                return sample_attachments[0]
+            return {"from": {"emailAddress": {"address": "sender@example.com"}}}
+
+        mock_client.get.side_effect = _mock_get
+        mock_client.get_all.return_value = sample_attachments
+        mock_client_class.return_value = mock_client
+
+        client = MailClient()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = client.download_attachment(
+                "msg-123", "AAMkAGUz...", output_path=f"{tmpdir}/meeting_notes.txt"
+            )
+            assert os.path.exists(path)
+            with open(path, "rb") as f:
+                content = f.read()
+            assert content == b"Hello, this is test content."
+
+        del os.environ["OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD"]
+        del os.environ["OFFICECLAW_SAFE_SENDERS_ONLY"]
+        del os.environ["OFFICECLAW_SAFE_SENDERS_LIST"]
+
+    @patch("officeclaw.mail.GraphClient")
+    def test_download_attachment_blocked_sender(self, mock_client_class, sample_attachments):
+        """Test attachment download blocked by sender."""
+        import os
+
+        from officeclaw.exceptions import AttachmentSecurityError
+        from officeclaw.mail import MailClient
+
+        os.environ["OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD"] = "true"
+        os.environ["OFFICECLAW_SAFE_SENDERS_ONLY"] = "true"
+        os.environ["OFFICECLAW_SAFE_SENDERS_LIST"] = "safe@example.com"
+
+        mock_client = MagicMock()
+        mock_client.get.return_value = {
+            "from": {"emailAddress": {"address": "bad@example.com"}},
+        }
+        mock_client_class.return_value = mock_client
+
+        client = MailClient()
+        with pytest.raises(AttachmentSecurityError):
+            client.download_attachment("msg-123", "AAMkAGUz...")
+
+        del os.environ["OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD"]
+        del os.environ["OFFICECLAW_SAFE_SENDERS_ONLY"]
+        del os.environ["OFFICECLAW_SAFE_SENDERS_LIST"]
+
+    @patch("officeclaw.mail.GraphClient")
+    def test_download_attachment_disabled(self, mock_client_class):
+        """Test attachment download blocked when gate is disabled."""
+        import os
+
+        from officeclaw.exceptions import AttachmentSecurityError
+        from officeclaw.mail import MailClient
+
+        # Ensure gate is disabled
+        os.environ.pop("OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD", None)
+
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+
+        client = MailClient()
+        with pytest.raises(AttachmentSecurityError):
+            client.download_attachment("msg-123", "AAMkAGUz...")
+
+    @patch("officeclaw.mail.GraphClient")
+    def test_download_attachment_size_exceeded(self, mock_client_class, sample_attachments):
+        """Test attachment download blocked by size limit."""
+        import os
+
+        from officeclaw.exceptions import AttachmentSizeError
+        from officeclaw.mail import MailClient
+
+        os.environ["OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD"] = "true"
+        os.environ["OFFICECLAW_ATTACHMENT_MAX_SIZE_MB"] = "5"
+
+        mock_client = MagicMock()
+
+        def _mock_get(endpoint):
+            if "attachments/AAMkAGUy" in endpoint:
+                return sample_attachments[1]
+            return {"from": {"emailAddress": {"address": "sender@example.com"}}}
+
+        mock_client.get.side_effect = _mock_get
+        mock_client.get_all.return_value = sample_attachments
+        mock_client_class.return_value = mock_client
+
+        client = MailClient()
+        # report.pdf is 10MB which exceeds 5MB limit
+        with pytest.raises(AttachmentSizeError):
+            client.download_attachment("msg-123", "AAMkAGUy...")
+
+        del os.environ["OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD"]
+        del os.environ["OFFICECLAW_ATTACHMENT_MAX_SIZE_MB"]
+
+    @patch("officeclaw.mail.GraphClient")
+    def test_download_attachment_type_not_allowed(self, mock_client_class, sample_attachments):
+        """Test attachment download blocked by MIME type."""
+        import os
+
+        from officeclaw.exceptions import AttachmentTypeError
+        from officeclaw.mail import MailClient
+
+        os.environ["OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD"] = "true"
+        os.environ["OFFICECLAW_ATTACHMENT_ALLOWED_TYPES"] = "text/plain"
+
+        mock_client = MagicMock()
+
+        def _mock_get(endpoint):
+            if "attachments/AAMkAGUy" in endpoint:
+                return sample_attachments[1]
+            return {"from": {"emailAddress": {"address": "sender@example.com"}}}
+
+        mock_client.get.side_effect = _mock_get
+        mock_client.get_all.return_value = sample_attachments
+        mock_client_class.return_value = mock_client
+
+        client = MailClient()
+        # report.pdf is application/pdf which is not text/plain
+        with pytest.raises(AttachmentTypeError):
+            client.download_attachment("msg-123", "AAMkAGUy...")
+
+        del os.environ["OFFICECLAW_ENABLE_ATTACHMENT_DOWNLOAD"]
+        del os.environ["OFFICECLAW_ATTACHMENT_ALLOWED_TYPES"]
+
+
+class TestSearchOrdering:
+    """Graph rejects $search combined with $orderby."""
+
+    @patch("officeclaw.mail.GraphClient")
+    def test_orderby_dropped_when_searching(self, mock_client_class):
+        from officeclaw.mail import MailClient
+
+        mock_client = MagicMock()
+        mock_client.get_all.return_value = []
+        mock_client_class.return_value = mock_client
+
+        MailClient().list_messages(search="invoice")
+
+        params = mock_client.get_all.call_args[1]["params"]
+        assert params["$search"] == '"invoice"'
+        assert "$orderby" not in params
+
+    @patch("officeclaw.mail.GraphClient")
+    def test_orderby_kept_without_search(self, mock_client_class):
+        from officeclaw.mail import MailClient
+
+        mock_client = MagicMock()
+        mock_client.get_all.return_value = []
+        mock_client_class.return_value = mock_client
+
+        MailClient().list_messages()
+
+        params = mock_client.get_all.call_args[1]["params"]
+        assert params["$orderby"] == "receivedDateTime desc"
+
+    @patch("officeclaw.mail.GraphClient")
+    def test_ordering_dropped_when_graph_rejects_the_filter(self, mock_client_class):
+        """Graph raises InefficientFilter for some filter/sort pairings."""
+        from officeclaw.exceptions import GraphAPIError
+        from officeclaw.mail import MailClient
+
+        mock_client = MagicMock()
+        mock_client.get_all.side_effect = [
+            GraphAPIError("InefficientFilter", "too complex", 400),
+            [{"id": "msg-1"}],
+        ]
+        mock_client_class.return_value = mock_client
+
+        messages = MailClient().list_messages(filter_query="hasAttachments eq true")
+
+        assert messages == [{"id": "msg-1"}]
+        first, second = mock_client.get_all.call_args_list
+        assert "$orderby" in first[1]["params"]
+        assert "$orderby" not in second[1]["params"]
+
+    @patch("officeclaw.mail.GraphClient")
+    def test_other_graph_errors_are_not_retried(self, mock_client_class):
+        from officeclaw.exceptions import GraphAPIError
+        from officeclaw.mail import MailClient
+
+        mock_client = MagicMock()
+        mock_client.get_all.side_effect = GraphAPIError("AccessDenied", "nope", 403)
+        mock_client_class.return_value = mock_client
+
+        with pytest.raises(GraphAPIError):
+            MailClient().list_messages(filter_query="hasAttachments eq true")
+
+        assert mock_client.get_all.call_count == 1

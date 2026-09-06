@@ -6,6 +6,7 @@ Provides calendar management through Microsoft Graph API.
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 from officeclaw.client import GraphClient
@@ -65,15 +66,95 @@ class CalendarClient:
                 "id,subject,start,end,location,organizer,isAllDay,isCancelled,bodyPreview"
             )
 
-        # Use Prefer header for timezone
-        if timezone:
-            pass
+        # Graph returns times in the mailbox's default timezone unless asked
+        # otherwise, and only via a header.
+        headers = {"Prefer": f'outlook.timezone="{timezone}"'} if timezone else None
 
         return self._client.get_all(
             "/me/calendarView",
             params=params,
             limit=limit,
+            headers=headers,
         )
+
+    # Simple names for the patterns people actually ask for from a CLI.
+    RECURRENCE_PATTERNS = {
+        "daily": {"type": "daily", "interval": 1},
+        "weekly": {"type": "weekly", "interval": 1},
+        "fortnightly": {"type": "weekly", "interval": 2},
+        "monthly": {"type": "absoluteMonthly", "interval": 1},
+        "yearly": {"type": "absoluteYearly", "interval": 1},
+        "weekdays": {
+            "type": "weekly",
+            "interval": 1,
+            "daysOfWeek": ["monday", "tuesday", "wednesday", "thursday", "friday"],
+        },
+    }
+
+    @classmethod
+    def build_recurrence(
+        cls,
+        pattern: str,
+        start: str,
+        until: str | None = None,
+        count: int | None = None,
+        timezone: str = "UTC",
+    ) -> dict[str, Any]:
+        """
+        Build a patternedRecurrence from a simple pattern name.
+
+        Full RRULE expressions are deliberately not supported; the named
+        patterns cover what CLI event creation is for.
+
+        Args:
+            pattern: One of RECURRENCE_PATTERNS
+            start: First occurrence date (YYYY-MM-DD or ISO datetime)
+            until: Last date the series may run to
+            count: Number of occurrences (alternative to ``until``)
+            timezone: Timezone the range is expressed in
+
+        Returns:
+            A patternedRecurrence object
+
+        Raises:
+            ValueError: If the pattern is unknown, or both until and count given
+        """
+        if pattern not in cls.RECURRENCE_PATTERNS:
+            allowed = ", ".join(sorted(cls.RECURRENCE_PATTERNS))
+            raise ValueError(f"Unknown recurrence {pattern!r}. Expected one of: {allowed}.")
+        if until and count:
+            raise ValueError("Give either --recurrence-until or --recurrence-count, not both.")
+
+        recurrence_pattern = dict(cls.RECURRENCE_PATTERNS[pattern])
+        start_date = start.split("T")[0]
+
+        if recurrence_pattern["type"] == "weekly" and "daysOfWeek" not in recurrence_pattern:
+            weekday = date.fromisoformat(start_date).strftime("%A").lower()
+            recurrence_pattern["daysOfWeek"] = [weekday]
+        if recurrence_pattern["type"] == "absoluteMonthly":
+            recurrence_pattern["dayOfMonth"] = date.fromisoformat(start_date).day
+        if recurrence_pattern["type"] == "absoluteYearly":
+            parsed = date.fromisoformat(start_date)
+            recurrence_pattern["dayOfMonth"] = parsed.day
+            recurrence_pattern["month"] = parsed.month
+
+        if until:
+            recurrence_range: dict[str, Any] = {
+                "type": "endDate",
+                "startDate": start_date,
+                "endDate": until,
+            }
+        elif count:
+            recurrence_range = {
+                "type": "numbered",
+                "startDate": start_date,
+                "numberOfOccurrences": count,
+            }
+        else:
+            recurrence_range = {"type": "noEnd", "startDate": start_date}
+
+        recurrence_range["recurrenceTimeZone"] = timezone
+        return {"pattern": recurrence_pattern, "range": recurrence_range}
 
     def get_event(self, event_id: str) -> dict[str, Any]:
         """
@@ -85,7 +166,8 @@ class CalendarClient:
         Returns:
             Event object with full details
         """
-        return self._client.get(f"/me/events/{event_id}")
+        event: dict[str, Any] = self._client.get(f"/me/events/{event_id}")
+        return event
 
     def create_event(
         self,
@@ -98,6 +180,7 @@ class CalendarClient:
         timezone: str = "UTC",
         is_all_day: bool = False,
         is_online_meeting: bool = False,
+        recurrence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         Create a calendar event.
@@ -112,6 +195,7 @@ class CalendarClient:
             timezone: Timezone for start/end
             is_all_day: All-day event
             is_online_meeting: Create Teams meeting
+            recurrence: patternedRecurrence object; see build_recurrence()
 
         Returns:
             Created event object
@@ -151,7 +235,11 @@ class CalendarClient:
             event["isOnlineMeeting"] = True
             event["onlineMeetingProvider"] = "teamsForBusiness"
 
-        return self._client.post("/me/events", event)
+        if recurrence:
+            event["recurrence"] = recurrence
+
+        created: dict[str, Any] = self._client.post("/me/events", event)
+        return created
 
     def update_event(
         self,
@@ -204,7 +292,8 @@ class CalendarClient:
                 "content": body,
             }
 
-        return self._client.patch(f"/me/events/{event_id}", data)
+        updated: dict[str, Any] = self._client.patch(f"/me/events/{event_id}", data)
+        return updated
 
     def delete_event(self, event_id: str) -> None:
         """Delete a calendar event."""
