@@ -4,10 +4,10 @@ description: Connect to personal Microsoft accounts via Microsoft Graph API to m
 license: Apache-2.0
 homepage: https://github.com/danielithomas/officeclaw
 user-invocable: true
-compatibility: Requires Python 3.9+, network access to graph.microsoft.com, and one-time OAuth setup
+compatibility: Requires Python 3.10+, network access to graph.microsoft.com, and one-time OAuth setup
 metadata:
   author: Daniel Thomas
-  version: "1.0.4"
+  version: "1.1.0"
   openclaw:
     requires:
       anyBins: ["python", "python3", "officeclaw"]
@@ -21,23 +21,29 @@ Connect your OpenClaw agent to personal Microsoft accounts (Outlook.com, Hotmail
 
 ## Installation
 
-Install from PyPI:
+**This skill documents officeclaw 1.1.0.** Earlier versions lack `--list-name`,
+the due-date filters, `mail download-all`, `calendar --recurrence`, `auth refresh`
+and JSON error output, and they enforce the recipient allowlist on `mail send`
+only. Install or upgrade to at least 1.1.0:
 
 ```bash
-pip install officeclaw
+pip install --upgrade "officeclaw>=1.1.0"
 ```
 
 Or with uv:
 
 ```bash
-uv pip install officeclaw
+uv pip install --upgrade "officeclaw>=1.1.0"
 ```
 
-Verify installation:
+Verify the installed version:
 
 ```bash
-officeclaw --version
+officeclaw --version   # expect 1.1.0 or newer
 ```
+
+Requires Python 3.10 or newer (3.9 reached end of life in October 2025, and the
+patched releases of the dependencies need 3.10).
 
 ## Setup (One-Time)
 

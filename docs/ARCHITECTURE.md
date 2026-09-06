@@ -49,7 +49,7 @@ officeclaw/
 [project]
 name = "officeclaw"
 version = "1.0.2"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 
 [project.scripts]
 officeclaw = "officeclaw.cli:main"  # Creates `officeclaw` command
@@ -232,7 +232,7 @@ Due-date filtering happens client-side: `todoTask.dueDateTime.dateTime` is an `E
    - TruffleHog (secret scanning)
 
 3. **Test Matrix**
-   - Python 3.9, 3.10, 3.11, 3.12
+   - Python 3.10, 3.11, 3.12, 3.13
    - pytest with coverage
    - Upload to Codecov
 
