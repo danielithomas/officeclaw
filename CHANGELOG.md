@@ -2,6 +2,20 @@
 
 All notable changes to OfficeClaw are documented here.
 
+## [1.1.1] — 2026-09-06
+
+### Fixed
+- **OpenClaw skill manifest**, which the 1.1.0 sdist shipped with stale
+  metadata: it advertised `version: "1.0.4"` and `Requires Python 3.9+`. The
+  Python claim was the consequential one — 1.1.0 requires 3.10, so a host
+  trusting the manifest could install the skill where it cannot run. The
+  installation section now pins `officeclaw>=1.1.0` and lists the commands that
+  need it.
+- `docs/ARCHITECTURE.md` still showed `requires-python = ">=3.9"` and a Python
+  3.9 CI matrix.
+
+No code changes: the package itself is identical to 1.1.0.
+
 ## [1.1.0] — 2026-09-05
 
 This release combines the security fixes from the 1.1.0 audit with the

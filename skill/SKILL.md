@@ -7,7 +7,7 @@ user-invocable: true
 compatibility: Requires Python 3.10+, network access to graph.microsoft.com, and one-time OAuth setup
 metadata:
   author: Daniel Thomas
-  version: "1.1.0"
+  version: "1.1.1"
   openclaw:
     requires:
       anyBins: ["python", "python3", "officeclaw"]
@@ -21,7 +21,7 @@ Connect your OpenClaw agent to personal Microsoft accounts (Outlook.com, Hotmail
 
 ## Installation
 
-**This skill documents officeclaw 1.1.0.** Earlier versions lack `--list-name`,
+**This skill ships with officeclaw 1.1.1 and needs at least 1.1.0.** Earlier versions lack `--list-name`,
 the due-date filters, `mail download-all`, `calendar --recurrence`, `auth refresh`
 and JSON error output, and they enforce the recipient allowlist on `mail send`
 only. Install or upgrade to at least 1.1.0:
